@@ -605,6 +605,7 @@ struct CommandField: NSViewRepresentable {
     @State private var acceptingInput = true
     @State private var fieldFocusRequest = 0
     @State private var scrollRequest = 0
+    @State private var listPosition = ScrollPosition()
     /// Every open tab, in every window: a title or favicon arriving redraws the row for it.
     @StateObject private var tabs = ChangeWatch()
     @AppStorage(Look.barVisibleRowsKey) private var visibleRows = Look.barVisibleRows
@@ -896,9 +897,10 @@ struct CommandField: NSViewRepresentable {
             }
             .frame(height: listHeight + listPadding)
             .scrollIndicators(.never)
-            .onChange(of: scrollRequest) {
-                if let first = rows.first { proxy.scrollTo(first.id, anchor: .top) }
-            }
+            .scrollPosition($listPosition)
+            // The scroll view's edge, not the first row's: aligning the row would scroll
+            // the list's top padding away whenever there are enough results to scroll.
+            .onChange(of: scrollRequest) { listPosition.scrollTo(edge: .top) }
             .onChange(of: index) {
                 guard rows.indices.contains(index) else { return }
                 proxy.scrollTo(rows[index].id)
