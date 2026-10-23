@@ -59,8 +59,18 @@ import XCTest
 
     func testInlineCompletionFillsOnlyTheStartOfAVisitedHost() {
         let urls = ["https://docs.google.com/x", "https://www.deepseek.com/chat"]
-        XCTAssertEqual(Palette.completeHost("d", urls: urls), "docs.google.com")
-        XCTAssertEqual(Palette.completeHost("DE", urls: urls), "deepseek.com", "www. and case are ignored")
+        XCTAssertEqual(Palette.completeHost("d", urls: urls)?.text, "docs.google.com")
+        XCTAssertEqual(Palette.completeHost("d", urls: urls)?.url.absoluteString, "https://docs.google.com/",
+                       "Return opens the site's origin, not the visited page")
+        let deep = Palette.completeHost("DE", urls: urls)
+        XCTAssertEqual(deep?.text, "deepseek.com", "www. and case are ignored")
+        XCTAssertEqual(deep?.url.absoluteString, "https://www.deepseek.com/", "…but the real host is kept")
+        let local = Palette.completeHost("loc", urls: ["http://localhost:3000/path"])
+        XCTAssertEqual(local?.text, "localhost:3000")
+        XCTAssertEqual(local?.url.absoluteString, "http://localhost:3000/", "a port survives")
+        XCTAssertEqual(Palette.completeHost("se", urls: ["http://server/wiki"])?.url.absoluteString,
+                       "http://server/", "a single-label host opens rather than searches")
+        XCTAssertNil(Palette.completeHost("fi", urls: ["file:///Users/me/notes.txt"]), "only web origins")
         XCTAssertNil(Palette.completeHost("seek", urls: urls), "the middle of a host is not its start")
         XCTAssertNil(Palette.completeHost("deepseek.com", urls: urls), "a fully typed host has no tail")
         XCTAssertNil(Palette.completeHost("de ep", urls: urls), "a space means a search")

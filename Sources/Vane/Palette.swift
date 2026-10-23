@@ -100,17 +100,33 @@ enum Palette {
         hover.flatMap { $0 < rowCount ? $0 : nil }
     }
 
+    /// What the field shows (`text`) and where Return goes (`url`): the site's own origin,
+    /// so a port or a single-label intranet host survives what re-parsing the text would lose.
+    struct HostCompletion: Equatable {
+        let text: String
+        let url: URL
+    }
+
     /// Inline completion: the first visited or open site whose host, without `www.`,
-    /// begins with what was typed — "d" becomes "deepseek.com". Hosts only, never paths, so
-    /// Return lands on the site rather than one old page of it. Nil for anything that is
-    /// not the start of a host, or once the host is typed in full.
-    static func completeHost(_ typed: String, urls: [String]) -> String? {
+    /// begins with what was typed — "d" becomes "deepseek.com", "loc" "localhost:3000".
+    /// Origins only, never paths, so Return lands on the site rather than one old page of
+    /// it. Nil for anything that is not the start of a host, or once it is typed in full.
+    static func completeHost(_ typed: String, urls: [String]) -> HostCompletion? {
         let typed = typed.lowercased()
         guard !typed.isEmpty, !typed.contains(where: \.isWhitespace) else { return nil }
         for url in urls {
-            guard var host = URL(string: url)?.host?.lowercased() else { continue }
-            if host.hasPrefix("www.") { host.removeFirst(4) }
-            if host.count > typed.count, host.hasPrefix(typed) { return host }
+            guard let parts = URLComponents(string: url), let scheme = parts.scheme,
+                  ["http", "https"].contains(scheme.lowercased()),
+                  let rawHost = parts.host?.lowercased(), !rawHost.isEmpty else { continue }
+            let host = rawHost.hasPrefix("www.") ? String(rawHost.dropFirst(4)) : rawHost
+            let text = host + (parts.port.map { ":\($0)" } ?? "")
+            guard text.count > typed.count, text.hasPrefix(typed) else { continue }
+            var origin = URLComponents()
+            origin.scheme = scheme
+            origin.host = rawHost
+            origin.port = parts.port
+            origin.path = "/"
+            if let destination = origin.url { return HostCompletion(text: text, url: destination) }
         }
         return nil
     }
@@ -707,8 +723,9 @@ struct CommandField: NSViewRepresentable {
     @State private var windowHeight: CGFloat = .infinity
     /// The host the field is completing to, and whether the last edit was typing forward —
     /// a delete or a paste over the middle turns completion off until the next character.
-    @State private var completion: String?
+    @State private var completion: Palette.HostCompletion?
     @State private var completionAllowed = false
+    @State private var firstLetterVisits: (query: String, urls: [String]) = ("", [])
     /// Every open tab, in every window: a title or favicon arriving redraws the row for it.
     @StateObject private var tabs = ChangeWatch()
     // `.vane`, the store Search Settings writes through, so a `VANE_DATA_DIR` instance
@@ -830,7 +847,9 @@ struct CommandField: NSViewRepresentable {
             withAnimation(motion(Look.appear)) { shown = true }
         }
         .onChange(of: query) { old, _ in
-            completionAllowed = query.count > old.count && query.hasPrefix(old)
+            // Typing forward, or typing over the address ⌘L opened with selected.
+            completionAllowed = (query.count > old.count && query.hasPrefix(old))
+                || (seededAddress != nil && old == seededAddress && !query.isEmpty)
             if query != seededAddress { seededAddress = nil }
             if mode != .tabs, !actionsOnly, activeBang == nil,
                let activation = Bangs.activation(query, explicitOnly: true) {
@@ -842,6 +861,7 @@ struct CommandField: NSViewRepresentable {
             // will not show anyway.
             if mode != .tabs, !actionsOnly { store.suggest(typed, scopedTo: activeBang) }
             refresh()
+            lookUpFirstLetter()
         }
         // Search Tabs can replace the mode of an already-open bar. SwiftUI keeps
         // its state in that case, so rows/scopes must refresh without another onAppear.
@@ -933,7 +953,7 @@ struct CommandField: NSViewRepresentable {
                                  font: sidebarAddress ? Look.Typography.addressInput.native
                                      : Look.Typography.input.native,
                                  focusRequest: fieldFocusRequest,
-                                 canFocus: { acceptingInput }, completion: completion,
+                                 canFocus: { acceptingInput }, completion: completion?.text,
                                  onKey: key)
                 }
                 if let candidate = bangCandidate {
@@ -1355,12 +1375,32 @@ struct CommandField: NSViewRepresentable {
         axAnnounce(rows.isEmpty ? "No results" : "\(rows.count) result\(rows.count == 1 ? "" : "s")")
     }
 
-    private func inlineCompletion() -> String? {
-        guard completionAllowed, mode != .tabs, !actionsOnly, activeBang == nil,
-              query == typed else { return nil }
+    private var completesInline: Bool {
+        completionAllowed && mode != .tabs && !actionsOnly && activeBang == nil && query == typed
+    }
+
+    private func inlineCompletion() -> Palette.HostCompletion? {
+        guard completesInline else { return nil }
         let visited = store.suggestions.filter { !$0.completion }.map(\.url)
             + (store.suggestionsPending ? heldSuggestions.map(\.detail) : [])
+            + (firstLetterVisits.query == typed ? firstLetterVisits.urls : [])
         return Palette.completeHost(typed, urls: visited + tabRows().map(\.matchURL))
+    }
+
+    /// History is not suggested until two characters, but a first letter can still complete
+    /// a visited site: ask history for that letter's best pages, for completion only.
+    /// Never in a private window, which reads no saved history.
+    private func lookUpFirstLetter() {
+        let letter = typed
+        guard letter.count == 1, completesInline, !store.isPrivate,
+              firstLetterVisits.query != letter else { return }
+        let history = store.history
+        Task {
+            let pages = await history.suggestAsync(letter)
+            guard typed == letter else { return }
+            firstLetterVisits = (letter, pages.map(\.url))
+            refresh(reset: false, rebuildLocal: false)
+        }
     }
 
     /// Row one: what Return does with exactly what is in the field. Which of the three it is
@@ -1375,8 +1415,14 @@ struct CommandField: NSViewRepresentable {
             }
         }
         guard !typed.isEmpty else { return nil }
-        // An inline completion is what the field shows, so it is what Return opens.
-        let typed = completion ?? typed
+        // An inline completion is what the field shows, so it is what Return opens — its
+        // origin, not the text re-parsed.
+        if let completion {
+            return PaletteRow(id: "typed", icon: "globe", title: completion.text,
+                              trailing: "Open", kind: "Open") { target in
+                target().go(completion.url)
+            }
+        }
         let icon: String, trailing: String
         if let bang = Bangs.split(typed).flatMap({ Bangs.lookup($0.keyword) }) {
             (icon, trailing) = ("magnifyingglass", "Search \(bang.name)")
