@@ -979,7 +979,10 @@ struct TitleReveal: Equatable, Sendable {
     /// Split out of `suspend()` for `tearDown()`, which has to let go whatever the state of
     /// the tab: `suspend()` parks a page and so bails when there is no page to park, and
     /// "nothing was parked" must never mean "nothing was released".
-    private func release() {
+    /// `keepOnScreen`: the tab is closing, so its page may stay up — silenced — until the
+    /// next one has loaded (see `WebHost.retire`). Suspension and folder locks never pass it:
+    /// a locked page's pixels have to go at once.
+    private func release(keepOnScreen: Bool = false) {
         Previews.shared.cancel(from: self)
         navigationState.invalidate()
         loading = false
@@ -1028,10 +1031,16 @@ struct TitleReveal: Equatable, Sendable {
         old.configuration.userContentController.removeScriptMessageHandler(forName: StatusBar.messageName)
         old.configuration.userContentController.removeScriptMessageHandler(
             forName: PageFocus.messageName, contentWorld: PageFocus.world)
-        if let host = old.superview as? WebHost { host.remove(old) }
-        else { old.removeFromSuperview() }
-        // Explicitly stop the WebKit page before dropping our final ownership edge.
-        Tab.close(old)
+        if keepOnScreen, let host = old.superview as? WebHost {
+            // Explicitly stop the WebKit page before dropping our final ownership edge —
+            // here once it is off screen, within `WebHost.coverLimit`.
+            host.retire(old) { Tab.close(old) }
+        } else {
+            if let host = old.superview as? WebHost { host.remove(old) }
+            else { old.removeFromSuperview() }
+            // Explicitly stop the WebKit page before dropping our final ownership edge.
+            Tab.close(old)
+        }
         existingWeb = nil
     }
 
@@ -1083,7 +1092,7 @@ struct TitleReveal: Equatable, Sendable {
         easelSession?.liveItems.removeAll()
         easelObservation = nil
         if isPrivate { SitePermissions.forgetPrivate(tabID: id); ExternalApps.forgetPrivate(tabID: id) }
-        release()
+        release(keepOnScreen: true)
         TabAudio.forget(id)
     }
 

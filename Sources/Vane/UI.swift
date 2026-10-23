@@ -90,7 +90,115 @@ final class WebHost: NSView {
         if let web { show(web) }
     }
 
+    /// The page being left, kept on screen over the arriving one until that has loaded, so
+    /// a switch to a sleeping tab or the close of the one showing does not uncover the bare
+    /// ground for the length of a reload. `coverDone` is what letting go of it means: hiding
+    /// a page its tab still has, or closing one whose tab has gone.
+    private var cover: WKWebView?
+    private var coverDone: (() -> Void)?
+    private var coverWatch: NSKeyValueObservation?
+    /// The page the cover is waiting on, and whether it has been seen loading yet: a page
+    /// mounted fresh — woken from sleep — can report not-loading before its load begins.
+    private weak var coverArrival: WKWebView?
+    private var arrivalStarted = false
+    private var coverDeadline: DispatchWorkItem?
+    /// ponytail: load-finished stands in for first paint, which WebKit only reports through
+    /// SPI and not at all for an `interactionState` restore. Ceiling: a slow page shows the
+    /// old one for at most this long, then fades to whatever has drawn.
+    nonisolated static let coverLimit: TimeInterval = 1
+
+    /// Whether leaving a page should keep it up: only when something on screen would
+    /// otherwise show the ground — the arriving page is still loading.
+    nonisolated static func holdsOutgoing(arrivingLoading: Bool, onScreen: Bool) -> Bool {
+        arrivingLoading && onScreen
+    }
+
+    private var onScreen: Bool { window != nil && !offscreen && !isHidden }
+
+    private func holdCover(_ page: WKWebView, then done: @escaping () -> Void) {
+        releaseCover()
+        cover = page
+        coverDone = done
+        page.isHidden = false
+        addSubview(page, positioned: .above, relativeTo: nil)
+        // Fires even if the host has gone, so a retired page is always closed.
+        let deadline = DispatchWorkItem { [weak self] in
+            if let self { self.releaseCover(animated: true) } else { done() }
+        }
+        coverDeadline = deadline
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.coverLimit, execute: deadline)
+    }
+
+    /// Let go of the cover once `arriving` has loaded — at once if it was already up.
+    private func waitForArrival(_ arriving: WKWebView, fresh: Bool) {
+        guard let cover else { return }
+        addSubview(cover, positioned: .above, relativeTo: nil)
+        guard coverArrival !== arriving else { return }
+        coverArrival = arriving
+        arrivalStarted = arriving.isLoading
+        coverWatch = nil
+        guard arriving.isLoading || fresh else {
+            DispatchQueue.main.async { [weak self] in self?.releaseCover(animated: true) }
+            return
+        }
+        coverWatch = arriving.observe(\.isLoading, options: [.new]) { [weak self] web, _ in
+            let loading = web.isLoading
+            DispatchQueue.main.async {
+                guard let self, self.coverArrival === web else { return }
+                if loading { self.arrivalStarted = true }
+                else if self.arrivalStarted { self.releaseCover(animated: true) }
+            }
+        }
+    }
+
+    func releaseCover(animated: Bool = false) {
+        guard let page = cover else { return }
+        let done = coverDone
+        cover = nil
+        coverDone = nil
+        coverWatch = nil
+        coverArrival = nil
+        arrivalStarted = false
+        coverDeadline?.cancel()
+        coverDeadline = nil
+        let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            || BatterySaver.shared.isActive
+        guard animated, !reduced, page.window != nil else { done?(); return }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.12
+            page.animator().alphaValue = 0
+        }, completionHandler: {
+            page.alphaValue = 1
+            done?()
+        })
+    }
+
+    /// A page leaving for good — its tab closed — stays up, silenced, until whatever shows
+    /// next has loaded, then `close` stops it. A page that is not on screen goes at once.
+    func retire(_ page: WKWebView, close: @escaping () -> Void) {
+        guard page.superview === self, web === page, onScreen else {
+            remove(page)
+            close()
+            return
+        }
+        page.setAllMediaPlaybackSuspended(true)
+        recent.removeAll { $0 === page }
+        web = nil
+        holdCover(page) { [weak self, weak page] in
+            if let self, let page { self.remove(page) }
+            close()
+        }
+    }
+
+    /// The old page must not take clicks meant for the one arriving under it.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        if let cover, let hit, hit === cover || hit.isDescendant(of: cover) { return nil }
+        return hit
+    }
+
     func removePage() {
+        releaseCover()
         for page in recent {
             Inspector.hideAttached(to: page, in: self)
             if page.superview === self { page.removeFromSuperview() }
@@ -186,7 +294,10 @@ final class WebHost: NSView {
     /// than anything that would keep a register. Ceiling: a tab closed while the card is not
     /// redrawing keeps its page until the next switch, which is the next thing that happens.
     func show(_ next: WKWebView, keeping live: [WKWebView] = []) {
+        // Back to the page still covering: it is simply the page again.
+        if cover === next { releaseCover() }
         let outgoing = web
+        let fresh = next.superview !== self
         if let outgoing, outgoing !== next { Inspector.hideAttached(to: outgoing, in: self) }
         if next.superview !== self {
             if let previousHost = next.superview {
@@ -198,6 +309,14 @@ final class WebHost: NSView {
             ground(next)
         }
         next.isHidden = false
+        if let outgoing, outgoing !== next, outgoing.superview === self,
+           WebHost.holdsOutgoing(arrivingLoading: next.isLoading || fresh, onScreen: onScreen) {
+            holdCover(outgoing) { [weak self, weak outgoing] in
+                guard let self, let outgoing, self.web !== outgoing else { return }
+                outgoing.isHidden = true
+            }
+        }
+        waitForArrival(next, fresh: fresh)
         web = next
         recent.removeAll { $0 === next }
         recent.insert(next, at: 0)
@@ -227,7 +346,7 @@ final class WebHost: NSView {
                 window.makeFirstResponder(next)
             }
         }
-        for page in held where page !== next {
+        for page in held where page !== next && page !== cover {
             if going.contains(ObjectIdentifier(page)) {
                 Inspector.hideAttached(to: page, in: self)
                 page.removeFromSuperview()
@@ -256,6 +375,10 @@ final class WebHost: NSView {
         let a = "page a", b = "page b", gone = "closed tab's page"
         let many = (0..<12).map { "pinned page \($0)" }
         return [
+            ("a page being left stays up only while the arriving one is still loading",
+             holdsOutgoing(arrivingLoading: true, onScreen: true)
+                && !holdsOutgoing(arrivingLoading: false, onScreen: true)
+                && !holdsOutgoing(arrivingLoading: true, onScreen: false)),
             ("a page whose tab still has it is kept for the switch back",
              dropping([a, b], showing: a, live: [a, b], recent: [a, b]).isEmpty),
             ("a closed tab's page is let go of",

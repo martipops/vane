@@ -187,7 +187,8 @@ motion is reduced. Space switching stays smoothly animated in Battery Saver and 
 respects system Reduce Motion. Active pages, pinned tabs, media/Picture in Picture, private tabs,
 and unfinished forms keep their existing suspension protections. State changes show a
 temporary green lightning popup at the page's top right, with an **Edit this setting**
-button. Hovering keeps the popup visible; sleeping tabs reload when selected. The mode
+button. Hovering keeps the popup visible; sleeping tabs reload when selected, and the page
+you were on stays up until the reloaded one has loaded (up to a second). The mode
 respects the existing idle-suspension preference and preserves an already shorter
 timeout.
 
