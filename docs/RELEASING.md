@@ -154,7 +154,7 @@ To verify an *unchanged, notarized* release ZIP on a graphical test machine:
 scripts/check-release-candidate.sh Vane.zip /path/to/empty-evidence-directory
 ```
 
-That script checks the archive and bundle contents, signature, stapled ticket,
+That script extracts with the production update reader, then checks bundle contents, signature, stapled ticket,
 Gatekeeper assessment, and WebKit smoke test, and saves evidence. A clean Mac
 installation and upgrade still need to be exercised separately.
 
