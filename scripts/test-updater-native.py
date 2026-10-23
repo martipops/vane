@@ -157,7 +157,7 @@ with tempfile.TemporaryDirectory(prefix='.vane-updater-native-', dir=pathlib.Pat
     # rights; it runs only transaction/relaunch code, never browser storage code.
     subprocess.run(['codesign', '--force', '--options', 'runtime', '--sign', os.environ.get('SIGN_ID', '-'),
                     '--entitlements', str(ROOT / 'Vane.entitlements'), str(driver)], check=True)
-    scenarios = ['healthy', 'crashed-launch', 'corrupted-new', 'legacy-rollback', 'unsupervised-rollback'] + (['failed-bootstrap', 'failed-bootstrap-stale', 'failed-bootstrap-malformed'] if options.bootstrap_failure else [])
+    scenarios = ['healthy', 'fresh-profile', 'crashed-launch', 'corrupted-new', 'legacy-rollback', 'unsupervised-rollback'] + (['failed-bootstrap', 'failed-bootstrap-stale', 'failed-bootstrap-malformed'] if options.bootstrap_failure else [])
     service = driver / 'Contents/XPCServices/io.github.notnaki.vane.UpdateInstaller.xpc'
     (service / 'Contents/MacOS').mkdir(parents=True)
     shutil.copy2(ROOT / 'installer/UpdateInstaller-Info.plist', service / 'Contents/Info.plist')
@@ -239,8 +239,9 @@ with tempfile.TemporaryDirectory(prefix='.vane-updater-native-', dir=pathlib.Pat
                 # Exercise upgrading an established installation, including its completed
                 # welcome state. The unchanged v0.0.34 release has a separate first-run
                 # resource lookup bug; an upgrade must not become a fresh installation.
-                preparation = launch_recorded([str(sandboxed_helper), '--prepare-upgrade-data', str(data)], environment, log)
-                assert preparation.wait(timeout=10) == 0
+                if scenario != 'fresh-profile':
+                    preparation = launch_recorded([str(sandboxed_helper), '--prepare-upgrade-data', str(data)], environment, log)
+                    assert preparation.wait(timeout=10) == 0
                 restart_worker = [str(target / 'Contents/XPCServices/io.github.notnaki.vane.UpdateInstaller.xpc/Contents/MacOS/VaneUpdateInstaller'), '--relaunch', str(target)]
                 command = [str(sandboxed_helper), '--restart', str(target)] if scenario == 'healthy' else ([str(target / 'Contents/MacOS/Vane')] if scenario == 'unsupervised-rollback' else restart_worker)
                 process = launch_recorded(command, environment, log)
@@ -265,7 +266,7 @@ with tempfile.TemporaryDirectory(prefix='.vane-updater-native-', dir=pathlib.Pat
                     assert not any('/Vane.app/Contents/MacOS/Vane' in entry[1] for entry in track(work).values())
                     process = launch_recorded([str(target / 'Contents/MacOS/Vane')], environment, log)
                     until(lambda: (data / 'vane.db').exists())
-                elif scenario == 'healthy':
+                elif scenario in ['healthy', 'fresh-profile']:
                     until(lambda: not record.exists(), seconds=60)
                     assert version(target) == new_version and not previous.exists()
                     assert (data / 'vane.db').exists(), 'XPC worker must preserve isolated browser storage'
