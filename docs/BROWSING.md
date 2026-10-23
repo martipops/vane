@@ -25,6 +25,8 @@ Showing or hiding the sidebar applies across all Spaces in that window, includin
 in other profiles. Each window keeps its own sidebar visibility.
 
 Hover a sidebar tab to see a compact name tooltip and a **Double-click to rename** hint.
+The tab's close button appears at the end of the row while you hover; otherwise the
+title uses the row's full width.
 Double-click a Today tab, pinned tab, favourite, or split pane to edit its name in
 place. Press **Return** to save or **Escape** to cancel; an empty name restores the
 page’s title.
@@ -114,6 +116,11 @@ window keeps its own selection. Private and Little Vane windows keep their own p
 Split View shows two to four pages side by side or stacked, with resizable dividers.
 Peek opens a link over the current page; Little Vane opens it in a separate compact
 window.
+
+Website sign-in and other small script-opened dialogs use a separate temporary window
+with a read-only website address and native close controls. They have no Little Vane
+branding, Open in Space action, sidebar row, or saved session entry. Closing the dialog
+leaves its originating tab open; ordinary `target="_blank"` links still open tabs.
 
 ## Search and history
 

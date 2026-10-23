@@ -284,7 +284,10 @@ private func standard(_ title: String, _ action: Selector) -> NSMenuItem {
 @MainActor private func passwordItems() -> [NSMenuItem] {
     [
 
-        item(.fillPassword) { Windows.current?.active?.fillPassword(announcing: true) },
+        item(.fillPassword) {
+            (WebsitePopupWindow.tab(in: NSApp.keyWindow) ?? Windows.current?.active)?
+                .fillPassword(announcing: true)
+        },
         item(.importPasswords) { PasswordImport.chooseAndImport() },
         .separator(),
         item("Export Passwords…", "") { Export.chooseAndExport(.passwords) },
@@ -359,11 +362,13 @@ private func standard(_ title: String, _ action: Selector) -> NSMenuItem {
         alert.addButton(withTitle: "Delete")
         alert.buttons.last?.hasDestructiveAction = true
         if alert.runModal() == .alertSecondButtonReturn {
-            if manager.delete(active.id) {
-                _ = Windows.switchTo(profile: manager.active)
-                rebuild()
-            } else {
-                Toasts.show("Couldn’t delete profile. Its data was kept.")
+            Task { @MainActor in
+                if await manager.deleteAsync(active.id) {
+                    _ = Windows.switchTo(profile: manager.active)
+                    rebuild()
+                } else {
+                    Toasts.show("Couldn’t delete profile. Its data was kept.")
+                }
             }
         }
     }

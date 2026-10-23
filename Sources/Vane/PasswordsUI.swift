@@ -40,6 +40,8 @@ import SwiftUI
     @State private var feedback: String?
     /// A refused write must be visible, so a failed save never looks like success.
     @State private var problem: String?
+    @State private var mutationInFlight = false
+    @State private var mutationTask: Task<Void, Never>?
     /// Plaintext lives only while the manager is visible, including its add/edit drafts.
     @StateObject private var secrets = PasswordManagerSecrets()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -343,14 +345,23 @@ import SwiftUI
             addProblem = "This login already exists. Open it and choose Edit to change it."
             return
         }
-        do {
-            try Passwords.saveChecked(origin: origin, account: account, password: secrets.draftPassword,
-                                      profileID: profileID, replacingExisting: false)
-        } catch { addProblem = error.localizedDescription; return }
-        Passwords.allowSaving(host: host, profileID: profileID)
-        secrets.adding = false; forgetSecrets(); reload()
-        navigate(to: host)
-        axAnnounce("Password saved.")
+        guard !mutationInFlight, let operation = Passwords.beginUIOperation() else { return }
+        let password = secrets.draftPassword, scope = profileID, context = secrets.secretContext
+        mutationInFlight = true
+        mutationTask = Task {
+            defer { mutationInFlight = false; operation.finish() }
+            do { try await Passwords.addAsync(origin: origin, account: account, password: password, profileID: scope) }
+            catch {
+                guard profileID == scope, secrets.secretContext == context else { return }
+                addProblem = error.localizedDescription
+                return
+            }
+            guard profileID == scope, secrets.secretContext == context else { return }
+            Passwords.allowSaving(host: host, profileID: scope)
+            secrets.adding = false; forgetSecrets(); reload()
+            navigate(to: host)
+            axAnnounce("Password saved.")
+        }
     }
 
     private func glyph(_ symbol: String, _ label: String,
@@ -377,7 +388,7 @@ import SwiftUI
         if host == nil { searchFocused = true }
     }
 
-    private func forgetSecrets() { secrets.forget() }
+    private func forgetSecrets() { mutationTask?.cancel(); secrets.forget() }
 
     /// Hiding needs no permission; showing does — and what comes back is held for a minute
     /// and then dropped, whether or not anybody is still looking at this window.
@@ -483,33 +494,49 @@ import SwiftUI
             problem = "Enter a valid HTTPS website without a username or password in its URL."
             return
         }
-        do {
-            try Passwords.editChecked(login, origin: origin, account: account,
-                                      password: secrets.draftPassword, profileID: profileID)
-        } catch {
-            problem = error.localizedDescription
-            axAnnounce(problem ?? "")
-            return
+        guard !mutationInFlight, let operation = Passwords.beginUIOperation() else { return }
+        let password = secrets.draftPassword, scope = profileID, context = secrets.secretContext
+        mutationInFlight = true
+        mutationTask = Task {
+            defer { mutationInFlight = false; operation.finish() }
+            do { try await Passwords.editAsync(login, origin: origin, account: account, password: password, profileID: scope) }
+            catch {
+                guard profileID == scope, secrets.secretContext == context else { return }
+                problem = error.localizedDescription
+                axAnnounce(problem ?? "")
+                return
+            }
+            guard profileID == scope, secrets.secretContext == context else { return }
+            selectedHost = origin.host
+            forgetSecrets()
+            feedback = "Password updated"
+            selected = origin.key(account: account)
+            reload()
         }
-        selectedHost = origin.host
-        forgetSecrets()
-        feedback = "Password updated"
-        selected = origin.key(account: account)
-        reload()
     }
 
     private func remove(_ login: Passwords.Login) {
-        guard confirm("Delete the saved login for \(login.host)?", "Delete",
-                      PasswordsPane.deleteDetail(login)) else { return }
-        do { try Passwords.deleteChecked(origin: login.origin, account: login.account, profileID: profileID) }
-        catch { problem = error.localizedDescription; axAnnounce(problem ?? ""); return }
-        problem = nil
-        secrets.secretContext = UUID()
-        secrets.forgetting.removeValue(forKey: login.id)?.cancel()
-        secrets.revealed[login.id] = nil
-        if secrets.editing == login.id { cancelEditing() }
-        reload()
-        axAnnounce("Saved login for \(login.host) deleted.")
+        guard !mutationInFlight, confirm("Delete the saved login for \(login.host)?", "Delete",
+                      PasswordsPane.deleteDetail(login)),
+              let operation = Passwords.beginUIOperation() else { return }
+        let scope = profileID, context = secrets.secretContext
+        mutationInFlight = true
+        mutationTask = Task {
+            defer { mutationInFlight = false; operation.finish() }
+            do { try await Passwords.deleteAsync(login, profileID: scope) }
+            catch {
+                guard profileID == scope, secrets.secretContext == context else { return }
+                problem = error.localizedDescription; axAnnounce(problem ?? ""); return
+            }
+            guard profileID == scope, secrets.secretContext == context else { return }
+            problem = nil
+            secrets.secretContext = UUID()
+            secrets.forgetting.removeValue(forKey: login.id)?.cancel()
+            secrets.revealed[login.id] = nil
+            if secrets.editing == login.id { cancelEditing() }
+            reload()
+            axAnnounce("Saved login for \(login.host) deleted.")
+        }
     }
 
     // MARK: Keyboard
@@ -1021,8 +1048,9 @@ extension PasswordChooser {
         // .numericPad of its own, so testing the whole device-independent mask rejects every
         // arrow there is — which is exactly how this went unnoticed the first time.
         guard event.modifierFlags.intersection([.command, .option, .control]).isEmpty,
-              let store = TabStore.all.first(where: { $0.window === event.window }),
-              let tab = store.active, tab.passwordChoice != nil else { return false }
+              let tab = WebsitePopupWindow.tab(in: event.window)
+                ?? TabStore.all.first(where: { $0.window === event.window })?.active,
+              tab.passwordChoice != nil else { return false }
         if event.modifierFlags.contains(.shift), [126, 125, 36, 76].contains(event.keyCode) { return false }
         switch event.keyCode {
         case 126: tab.moveChoice(-1)
@@ -1039,8 +1067,10 @@ extension PasswordChooser {
     /// events. Preserve clicks inside the card so its buttons still receive mouse-up.
     @MainActor static func handlePointer(_ event: NSEvent) {
         guard [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type) else { return }
-        for store in TabStore.all where store.window === event.window {
-            for tab in store.everyTab where tab.existingWeb?.window === event.window {
+        let groups = TabStore.all.filter { $0.window === event.window }.map(\.everyTab)
+            + (WebsitePopupWindow.tab(in: event.window).map { [[$0]] } ?? [])
+        for tabs in groups {
+            for tab in tabs where tab.existingWeb?.window === event.window {
                 guard let web = tab.existingWeb else { continue }
                 if let generation = tab.passwordGeneration {
                     let size = web.bounds.size
@@ -1071,8 +1101,9 @@ extension PasswordChooser {
     /// on screen, so it is what Escape means. Returns true when it acted, so the caller
     /// swallows the key — see `VaneWindow.sendEvent`.
     @MainActor static func dismiss(in window: NSWindow?) -> Bool {
-        guard let store = TabStore.all.first(where: { $0.window === window }),
-              let tab = store.active, tab.passwordChoice != nil || tab.passwordGeneration != nil else { return false }
+        guard let tab = WebsitePopupWindow.tab(in: window)
+                ?? TabStore.all.first(where: { $0.window === window })?.active,
+              tab.passwordChoice != nil || tab.passwordGeneration != nil else { return false }
         tab.closeChooser(.escape)
         return true
     }
@@ -1218,9 +1249,9 @@ struct PasswordOffer: View {
             if let offer = tab.pendingSave {
                 PasswordOfferCard(offer: offer, profileID: tab.profileID,
                     problem: tab.passwordSaveProblem,
-                    dismiss: { tab.pendingSave = nil }, save: { tab.confirmSave() },
+                    dismiss: { tab.pendingSave = nil }, save: { tab.confirmSaveAsync() },
                     never: { tab.neverSaveHere() },
-                    saveReviewed: { tab.confirmSave(origin: $0, account: $1, password: $2) })
+                    saveReviewed: { tab.confirmSaveAsync(origin: $0, account: $1, password: $2) })
                     .id(offer.id)
                     .transition(reduceMotion || batterySaver.isActive ? .identity
                         : .opacity.combined(with: .scale(scale: Look.appearScale, anchor: .topTrailing)))
