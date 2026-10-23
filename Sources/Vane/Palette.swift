@@ -609,6 +609,7 @@ struct CommandField: NSViewRepresentable {
     @StateObject private var tabs = ChangeWatch()
     @AppStorage(Look.barVisibleRowsKey) private var visibleRows = Look.barVisibleRows
     @AppStorage(Look.barTopKey) private var barTop = Look.barTop
+    @AppStorage(Look.barAnimationsKey) private var animations = true
 
     /// At most `visibleRows` are visible; the rest are a scroll away. Arithmetic
     /// rather than a preference-key measuring dance, which the fixed row height makes exact.
@@ -641,9 +642,10 @@ struct CommandField: NSViewRepresentable {
                                    height - tallest - Look.inset))
     }
 
-    /// Nil under Reduce Motion, which SwiftUI reads as "just change".
+    /// Nil under Reduce Motion, Battery Saver or the Search Settings switch, which SwiftUI
+    /// reads as "just change".
     private func motion(_ a: Animation) -> Animation? {
-        reduceMotion || batterySaver.isActive ? nil : a
+        reduceMotion || batterySaver.isActive || !animations ? nil : a
     }
 
     private var bangCandidate: Bangs.Activation? {
@@ -688,8 +690,7 @@ struct CommandField: NSViewRepresentable {
                                                  geo.size.height - barHeight - Look.inset)
                                            : searchTop(geo.size.height)))
                     .animation(motion(Look.quick), value: rows.count)
-                    .animation(reduceMotion || batterySaver.isActive ? nil : Look.quick,
-                               value: sidebarLayout.stacked)
+                    .animation(motion(Look.quick), value: sidebarLayout.stacked)
             }
         }
         .vaneMotionPolicy()

@@ -112,6 +112,8 @@ enum Look {
     /// Where the search bar's top edge sits, as a fraction of the window's height. A
     /// quarter down is where a full list of `barVisibleRows` used to centre itself.
     static let barTopKey = "searchBarTop"
+    /// Off makes the bar change at once: rows, height and scope chips stop easing.
+    static let barAnimationsKey = "searchBarAnimations"
     static let barTop = 0.25
     static let barTopRange = 0.05...0.5
     static func clampedBarTop(_ f: Double) -> CGFloat {

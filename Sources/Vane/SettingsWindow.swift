@@ -1038,6 +1038,7 @@ private struct SearchPane: View {
     @AppStorage("searchSuggestions") private var suggestions = false
     @AppStorage(Look.barVisibleRowsKey) private var visibleRows = Look.barVisibleRows
     @AppStorage(Look.barTopKey) private var barTop = Look.barTop
+    @AppStorage(Look.barAnimationsKey) private var barAnimations = true
     // Neither list is @Published, so the views mirror them and refresh on every mutation.
     @State private var engines = Search.all
     @State private var newName = ""
@@ -1125,8 +1126,12 @@ private struct SearchPane: View {
                         minimumValueLabel: { Text("Top") } maximumValueLabel: { Text("Middle") }
                         .labelsHidden().frame(width: 220)
                 }
+                SettingsRow("Animate results") {
+                    Toggle("", isOn: $barAnimations).labelsHidden()
+                }
                 Footnote("The search bar keeps its place as results come and go. Results past "
-                         + "the count shown are a scroll away.")
+                         + "the count shown are a scroll away. With animation off, results "
+                         + "change at once as you type.")
             }
 
             SettingsCard {
