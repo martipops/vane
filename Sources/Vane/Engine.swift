@@ -2313,6 +2313,10 @@ struct Stash {
         }
     }
     @Published var suggestions: [Suggestion] = []
+    /// True from a query's first keystroke until both its history and engine halves are in.
+    /// `suggestions` is always the current query's; the bar reads this to know whether an
+    /// empty list is an answer or still on its way.
+    @Published private(set) var suggestionsPending = false
     /// -1 means "no suggestion highlighted" — Enter then uses what was typed.
     @Published var suggestionIndex = -1
 
@@ -2326,7 +2330,11 @@ struct Stash {
         suggestTask?.cancel()
         if !suggestions.isEmpty { suggestions = [] }
         if suggestionIndex != -1 { suggestionIndex = -1 }
-        guard !isPrivate, query.trimmingCharacters(in: .whitespaces).count >= 2 else { return }
+        guard !isPrivate, query.trimmingCharacters(in: .whitespaces).count >= 2 else {
+            if suggestionsPending { suggestionsPending = false }
+            return
+        }
+        if !suggestionsPending { suggestionsPending = true }
         let history = history
         suggestTask = Task { [weak self] in
             await SearchSuggestions.stream(query, local: {
@@ -2341,6 +2349,8 @@ struct Stash {
                 guard let self, self.suggestions != rows else { return }
                 self.suggestions = rows
             })
+            guard !Task.isCancelled else { return }
+            self?.suggestionsPending = false
         }
     }
 
@@ -2349,7 +2359,9 @@ struct Stash {
         suggestionIndex = max(-1, min(suggestions.count - 1, suggestionIndex + delta))
     }
 
-    func clearSuggestions() { suggestTask?.cancel(); suggestions = []; suggestionIndex = -1 }
+    func clearSuggestions() {
+        suggestTask?.cancel(); suggestions = []; suggestionIndex = -1; suggestionsPending = false
+    }
 
     let isPrivate: Bool
     /// A Little Arc window: one page, no sidebar, no Space. It shares the profile's cookies

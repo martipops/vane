@@ -606,6 +606,9 @@ struct CommandField: NSViewRepresentable {
     @State private var fieldFocusRequest = 0
     @State private var scrollRequest = 0
     @State private var listPosition = ScrollPosition()
+    /// The last query's history and engine rows, held while this query's are pending so
+    /// the list does not collapse to its defaults and refill on every keystroke.
+    @State private var heldSuggestions: [PaletteRow] = []
     /// Every open tab, in every window: a title or favicon arriving redraws the row for it.
     @StateObject private var tabs = ChangeWatch()
     @AppStorage(Look.barVisibleRowsKey) private var visibleRows = Look.barVisibleRows
@@ -743,6 +746,7 @@ struct CommandField: NSViewRepresentable {
         // grow under the user without moving what they had already arrowed onto. The same
         // goes for a tab that renames itself or gets its favicon while the bar is up.
         .onChange(of: store.suggestions) { refresh(reset: false, rebuildLocal: false) }
+        .onChange(of: store.suggestionsPending) { refresh(reset: false, rebuildLocal: false) }
         // ChangeWatch invalidates the body on a tab notification; compare only
         // result/action content before rebuilding, including store-driven changes.
         .onChange(of: currentTabContent) { refresh(reset: false) }
@@ -1199,7 +1203,7 @@ struct CommandField: NSViewRepresentable {
             }
             layout = fresh
         }
-        let out = layout.rows(suggestions: layout.acceptsSuggestions ? suggestionRows() : [])
+        let out = layout.rows(suggestions: layout.acceptsSuggestions ? shownSuggestions() : [])
         // A cap so a bar over a hundred open tabs stays a list and not a scroll marathon —
         // but not while ⇥ is on, where the tail of the catalogue is the whole point.
         let visible = actionsOnly ? out : Feel03PaletteLayout.visible(out, limit: 24,
@@ -1254,6 +1258,20 @@ struct CommandField: NSViewRepresentable {
     /// them. A completion is a search that has not happened yet, so it gets no url and no
     /// "Open" label; the others are places, shown with their host so two pages with the
     /// same title can be told apart.
+    /// Held rows are shown only while they still contain what is typed, and only until
+    /// this query's own results are in — then those replace them, even when empty.
+    private func shownSuggestions() -> [PaletteRow] {
+        let live = suggestionRows()
+        guard store.suggestionsPending, live.isEmpty else {
+            heldSuggestions = live
+            return live
+        }
+        let needle = typed.lowercased()
+        return heldSuggestions.filter {
+            $0.title.lowercased().contains(needle) || $0.detail.lowercased().contains(needle)
+        }
+    }
+
     private func suggestionRows() -> [PaletteRow] {
         store.suggestions.map { (s: Suggestion) -> PaletteRow in
             let title = s.title.isEmpty ? s.url : s.title
