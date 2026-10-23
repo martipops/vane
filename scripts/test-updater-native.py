@@ -231,10 +231,16 @@ with tempfile.TemporaryDirectory(prefix='.vane-updater-native-', dir=pathlib.Pat
                 restart_worker = [str(target / 'Contents/XPCServices/io.github.notnaki.vane.UpdateInstaller.xpc/Contents/MacOS/VaneUpdateInstaller'), '--relaunch', str(target)]
                 command = [str(sandboxed_helper), '--restart', str(target)] if scenario == 'healthy' else ([str(target / 'Contents/MacOS/Vane')] if scenario == 'unsupervised-rollback' else restart_worker)
                 process = subprocess.Popen(command, env=environment, stdout=log, stderr=log)
-                track(work)
+                # Record this exact child directly before any global process inventory.
+                # Translocation lookups for unrelated apps can block the inventory and
+                # leave an exited driver unreaped past the worker's uncertainty deadline.
+                start = subprocess.check_output(['ps', '-p', str(process.pid), '-o', 'lstart='], text=True).strip()
+                owned[process.pid] = (start, ' '.join(command))
+                print(f'TEST PROCESS pid={process.pid} start={start} executable={command[0]}', flush=True)
                 if scenario == 'healthy':
                     process.wait(timeout=10)  # Reap the exited requesting parent before launch.
                     assert process.returncode == 0
+                track(work)
                 if scenario not in ['corrupted-new', 'legacy-rollback', 'unsupervised-rollback'] and not scenario.startswith('failed-bootstrap'):
                     until(lambda: record.exists() and json.loads(record.read_text())['state'] == 'launching')
                     assert previous.is_dir(), 'Previous bundle must remain before health'
