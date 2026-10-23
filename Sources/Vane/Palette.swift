@@ -100,6 +100,23 @@ enum Palette {
         hover.flatMap { $0 < rowCount ? $0 : nil }
     }
 
+    /// Whether an edit may complete inline: typing forward, or typing over the address ⌘L
+    /// opened with selected. A delete, a cut or a paste over the middle turns it off until
+    /// the next character.
+    static func typesForward(from old: String, to new: String, seeded: String?) -> Bool {
+        (new.count > old.count && new.hasPrefix(old))
+            || (seeded != nil && old == seeded && !new.isEmpty)
+    }
+
+    /// The addresses an inline completion may come from, best first: this query's history,
+    /// then rows still held from the last one, then the first-letter lookup history makes
+    /// for completion alone (history suggestions start at two characters), then open tabs.
+    static func completionSources(typed: String, history: [String], held: [String],
+                                  firstLetter: (query: String, urls: [String]),
+                                  tabs: [String]) -> [String] {
+        history + held + (firstLetter.query == typed ? firstLetter.urls : []) + tabs
+    }
+
     /// What the field shows (`text`) and where Return goes (`url`): the site's own origin,
     /// so a port or a single-label intranet host survives what re-parsing the text would lose.
     struct HostCompletion: Equatable {
@@ -847,9 +864,7 @@ struct CommandField: NSViewRepresentable {
             withAnimation(motion(Look.appear)) { shown = true }
         }
         .onChange(of: query) { old, _ in
-            // Typing forward, or typing over the address ⌘L opened with selected.
-            completionAllowed = (query.count > old.count && query.hasPrefix(old))
-                || (seededAddress != nil && old == seededAddress && !query.isEmpty)
+            completionAllowed = Palette.typesForward(from: old, to: query, seeded: seededAddress)
             if query != seededAddress { seededAddress = nil }
             if mode != .tabs, !actionsOnly, activeBang == nil,
                let activation = Bangs.activation(query, explicitOnly: true) {
@@ -1381,10 +1396,11 @@ struct CommandField: NSViewRepresentable {
 
     private func inlineCompletion() -> Palette.HostCompletion? {
         guard completesInline else { return nil }
-        let visited = store.suggestions.filter { !$0.completion }.map(\.url)
-            + (store.suggestionsPending ? heldSuggestions.map(\.detail) : [])
-            + (firstLetterVisits.query == typed ? firstLetterVisits.urls : [])
-        return Palette.completeHost(typed, urls: visited + tabRows().map(\.matchURL))
+        let urls = Palette.completionSources(
+            typed: typed, history: store.suggestions.filter { !$0.completion }.map(\.url),
+            held: store.suggestionsPending ? heldSuggestions.map(\.detail) : [],
+            firstLetter: firstLetterVisits, tabs: tabRows().map(\.matchURL))
+        return Palette.completeHost(typed, urls: urls)
     }
 
     /// History is not suggested until two characters, but a first letter can still complete

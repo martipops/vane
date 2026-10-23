@@ -139,4 +139,31 @@ import XCTest
         XCTAssertEqual(Palette.fittingRows(8, windowHeight: .infinity, chrome: chrome), 8,
                        "before the first layout the window's height is unknown")
     }
+
+    func testFirstLetterCompletesAHistoryOnlySite() {
+        // At one character history suggestions are empty and no tab matches; only the
+        // first-letter lookup knows the site, and only for the letter it was made for.
+        let lookup = (query: "d", urls: ["https://www.deepseek.com/chat"])
+        let sources = Palette.completionSources(typed: "d", history: [], held: [],
+                                                firstLetter: lookup, tabs: ["https://example.com/"])
+        XCTAssertEqual(Palette.completeHost("d", urls: sources)?.text, "deepseek.com")
+        XCTAssertTrue(Palette.completionSources(typed: "x", history: [], held: [],
+                                                firstLetter: lookup, tabs: []).isEmpty,
+                      "a lookup for another letter is not used")
+        XCTAssertEqual(Palette.completionSources(typed: "d", history: ["https://docs.google.com/"],
+                                                 held: [], firstLetter: lookup, tabs: []).first,
+                       "https://docs.google.com/", "this query's own history ranks first")
+    }
+
+    func testCompletionFollowsTypingForwardIncludingOverTheSeededAddress() {
+        XCTAssertTrue(Palette.typesForward(from: "de", to: "dee", seeded: nil))
+        XCTAssertFalse(Palette.typesForward(from: "dee", to: "de", seeded: nil), "a delete turns it off")
+        XCTAssertFalse(Palette.typesForward(from: "deep", to: "dexp", seeded: nil), "an edit in the middle too")
+        let address = "https://github.com/notnaki/vane"
+        XCTAssertTrue(Palette.typesForward(from: address, to: "g", seeded: address),
+                      "the first character typed over ⌘L's selected address completes")
+        XCTAssertFalse(Palette.typesForward(from: address, to: "", seeded: address), "clearing it does not")
+        XCTAssertFalse(Palette.typesForward(from: "github.com/x", to: "g", seeded: address),
+                       "only the address ⌘L opened with counts as a replacement")
+    }
 }
