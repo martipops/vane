@@ -57,6 +57,16 @@ import XCTest
         XCTAssertGreaterThan(Palette.score("doc", "mydoc doc")!, Palette.score("doc", "mydocdoc")!)
     }
 
+    func testInlineCompletionFillsOnlyTheStartOfAVisitedHost() {
+        let urls = ["https://docs.google.com/x", "https://www.deepseek.com/chat"]
+        XCTAssertEqual(Palette.completeHost("d", urls: urls), "docs.google.com")
+        XCTAssertEqual(Palette.completeHost("DE", urls: urls), "deepseek.com", "www. and case are ignored")
+        XCTAssertNil(Palette.completeHost("seek", urls: urls), "the middle of a host is not its start")
+        XCTAssertNil(Palette.completeHost("deepseek.com", urls: urls), "a fully typed host has no tail")
+        XCTAssertNil(Palette.completeHost("de ep", urls: urls), "a space means a search")
+        XCTAssertNil(Palette.completeHost("", urls: urls))
+    }
+
     func testURLMatchesAndLiteralWildcardsStayPredictable() throws {
         let store = try fixture()
         let url = URL(string: "https://www.example.com/docs")!

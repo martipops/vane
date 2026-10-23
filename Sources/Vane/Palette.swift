@@ -100,6 +100,21 @@ enum Palette {
         hover.flatMap { $0 < rowCount ? $0 : nil }
     }
 
+    /// Inline completion: the first visited or open site whose host, without `www.`,
+    /// begins with what was typed — "d" becomes "deepseek.com". Hosts only, never paths, so
+    /// Return lands on the site rather than one old page of it. Nil for anything that is
+    /// not the start of a host, or once the host is typed in full.
+    static func completeHost(_ typed: String, urls: [String]) -> String? {
+        let typed = typed.lowercased()
+        guard !typed.isEmpty, !typed.contains(where: \.isWhitespace) else { return nil }
+        for url in urls {
+            guard var host = URL(string: url)?.host?.lowercased() else { continue }
+            if host.hasPrefix("www.") { host.removeFirst(4) }
+            if host.count > typed.count, host.hasPrefix(typed) { return host }
+        }
+        return nil
+    }
+
     /// The bar before a character is typed (ref 2). Arc's ⌘T opens on this window's own
     /// tabs, most recently used first — `TabSwitcher.recent`'s order, the one ⌃⇥ walks —
     /// capped so the bar stays a glance, with one row under them to report a problem.
@@ -441,12 +456,16 @@ private struct PaletteRow: Identifiable {
 /// replaces it and ⌘L behaves like every other browser's location bar; and it sees Return,
 /// Shift-Return, Tab and the arrows before the field editor decides what they mean, rather
 /// than racing `onKeyPress` against it. Ceiling: a plain single-line NSTextField — no
-/// attributed text, no inline completion, no emoji picker.
+/// attributed text, no emoji picker. Inline completion is the selected tail of its string.
 ///
 /// Internal, not private: the find bar needs the same three things (selected on open, Return
 /// and Shift-Return seen first, focus that stays put), only smaller.
 struct CommandField: NSViewRepresentable {
-    enum Key { case up, down, enter, shiftEnter, commandEnter, tab, escape, forget, backspace }
+    enum Key {
+        case up, down, enter, shiftEnter, commandEnter, tab, escape, forget, backspace
+        /// A delete removed only the highlighted inline completion; what was typed is unchanged.
+        case dismissCompletion
+    }
 
     @Binding var text: String
     let prompt: String
@@ -460,6 +479,9 @@ struct CommandField: NSViewRepresentable {
     var focusRequest = 0
     /// A retiring overlay can still be mounted during its dismissal transition.
     var canFocus: () -> Bool = { true }
+    /// What `text` completes to. The field shows it with the untyped tail selected, so the
+    /// next character types over the tail and a delete removes it.
+    var completion: String? = nil
     /// Return true to swallow the key; false lets the field editor have it.
     let onKey: (Key) -> Bool
 
@@ -506,7 +528,18 @@ struct CommandField: NSViewRepresentable {
         // The coordinator holds a copy of this struct, so refresh it or the callbacks below
         // keep calling into the state the view had when it was first made.
         context.coordinator.parent = self
-        if f.stringValue != text { f.stringValue = text }
+        let shown = completion.flatMap { full -> String? in
+            guard full.count > text.count, full.lowercased().hasPrefix(text.lowercased()) else { return nil }
+            return text + full.dropFirst(text.count)
+        } ?? text
+        if f.stringValue != shown {
+            f.stringValue = shown
+            if shown != text, let editor = f.currentEditor() {
+                let start = (text as NSString).length
+                editor.selectedRange = NSRange(location: start, length: (shown as NSString).length - start)
+            }
+        }
+        context.coordinator.showsCompletion = shown != text
         if f.font != font { f.font = font }
         // The prompt is not fixed for the life of the field: ⇥ turns the bar into an
         // actions search and says so here as well as in the scope chip.
@@ -529,6 +562,8 @@ struct CommandField: NSViewRepresentable {
     @MainActor final class Coordinator: NSObject, NSTextFieldDelegate {
         var parent: CommandField
         var focusRequest: Int?
+        /// The field holds `parent.text` plus a selected completion tail.
+        var showsCompletion = false
         init(_ parent: CommandField) { self.parent = parent }
 
         private weak var pendingField: NSTextField?
@@ -566,6 +601,14 @@ struct CommandField: NSViewRepresentable {
 
         func controlTextDidChange(_ note: Notification) {
             guard let f = note.object as? NSTextField else { return }
+            let hadCompletion = showsCompletion
+            showsCompletion = false
+            // Deleting the selected tail leaves exactly what was typed: no edit to the
+            // query, but the completion has been turned down until the next character.
+            if hadCompletion, f.stringValue == parent.text {
+                _ = parent.onKey(.dismissCompletion)
+                return
+            }
             parent.text = f.stringValue
         }
 
@@ -588,6 +631,16 @@ struct CommandField: NSViewRepresentable {
                 #selector(NSResponder.deleteWordBackward(_:)),
                 #selector(NSResponder.deleteToBeginningOfLine(_:))].contains(selector) {
                 return parent.onKey(.forget)
+            }
+            // → or End accepts an inline completion: it becomes what was typed, so a delete
+            // after it edits the host instead of bringing the completion straight back.
+            if showsCompletion, [#selector(NSResponder.moveRight(_:)),
+                                 #selector(NSResponder.moveToEndOfLine(_:)),
+                                 #selector(NSResponder.moveToRightEndOfLine(_:)),
+                                 #selector(NSResponder.moveToEndOfDocument(_:))].contains(selector) {
+                showsCompletion = false
+                parent.text = textView.string
+                return false
             }
             switch selector {
             case #selector(NSResponder.deleteBackward(_:)): return parent.onKey(.backspace)
@@ -652,6 +705,10 @@ struct CommandField: NSViewRepresentable {
     @State private var heldSuggestions: [PaletteRow] = []
     /// The window's height, for capping the results to what fits under the field.
     @State private var windowHeight: CGFloat = .infinity
+    /// The host the field is completing to, and whether the last edit was typing forward —
+    /// a delete or a paste over the middle turns completion off until the next character.
+    @State private var completion: String?
+    @State private var completionAllowed = false
     /// Every open tab, in every window: a title or favicon arriving redraws the row for it.
     @StateObject private var tabs = ChangeWatch()
     // `.vane`, the store Search Settings writes through, so a `VANE_DATA_DIR` instance
@@ -772,7 +829,8 @@ struct CommandField: NSViewRepresentable {
             tabs.watch(allTabs)
             withAnimation(motion(Look.appear)) { shown = true }
         }
-        .onChange(of: query) {
+        .onChange(of: query) { old, _ in
+            completionAllowed = query.count > old.count && query.hasPrefix(old)
             if query != seededAddress { seededAddress = nil }
             if mode != .tabs, !actionsOnly, activeBang == nil,
                let activation = Bangs.activation(query, explicitOnly: true) {
@@ -875,7 +933,8 @@ struct CommandField: NSViewRepresentable {
                                  font: sidebarAddress ? Look.Typography.addressInput.native
                                      : Look.Typography.input.native,
                                  focusRequest: fieldFocusRequest,
-                                 canFocus: { acceptingInput }, onKey: key)
+                                 canFocus: { acceptingInput }, completion: completion,
+                                 onKey: key)
                 }
                 if let candidate = bangCandidate {
                     Button { enterBang(candidate) } label: {
@@ -1068,6 +1127,9 @@ struct CommandField: NSViewRepresentable {
         // The only key here that can decline: on a row with nothing to forget, ⌥⌘⌫ is
         // still the field editor's delete and must go back to it rather than be eaten.
         case .forget:       return forget()
+        case .dismissCompletion:
+            completionAllowed = false
+            refresh(reset: false)
         case .backspace:
             guard activeBang != nil, query.isEmpty else { return false }
             leaveBang()
@@ -1214,6 +1276,10 @@ struct CommandField: NSViewRepresentable {
     // MARK: The list
 
     private func refresh(reset: Bool = true, rebuildLocal: Bool = true) {
+        let completed = inlineCompletion()
+        // The typed row is local: a completion arriving with history has to rebuild it.
+        let rebuildLocal = rebuildLocal || completed != completion
+        completion = completed
         let selectedRow = rows.indices.contains(index) ? rows[index] : nil
         let selectedID = selectedRow?.id
         if rebuildLocal {
@@ -1289,6 +1355,14 @@ struct CommandField: NSViewRepresentable {
         axAnnounce(rows.isEmpty ? "No results" : "\(rows.count) result\(rows.count == 1 ? "" : "s")")
     }
 
+    private func inlineCompletion() -> String? {
+        guard completionAllowed, mode != .tabs, !actionsOnly, activeBang == nil,
+              query == typed else { return nil }
+        let visited = store.suggestions.filter { !$0.completion }.map(\.url)
+            + (store.suggestionsPending ? heldSuggestions.map(\.detail) : [])
+        return Palette.completeHost(typed, urls: visited + tabRows().map(\.matchURL))
+    }
+
     /// Row one: what Return does with exactly what is in the field. Which of the three it is
     /// is decided by asking the same functions that will run — `Bangs` then `Search.url`,
     /// the address bar's own decision table — rather than by a second copy of the heuristic.
@@ -1301,6 +1375,8 @@ struct CommandField: NSViewRepresentable {
             }
         }
         guard !typed.isEmpty else { return nil }
+        // An inline completion is what the field shows, so it is what Return opens.
+        let typed = completion ?? typed
         let icon: String, trailing: String
         if let bang = Bangs.split(typed).flatMap({ Bangs.lookup($0.keyword) }) {
             (icon, trailing) = ("magnifyingglass", "Search \(bang.name)")
