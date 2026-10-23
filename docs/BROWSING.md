@@ -162,7 +162,8 @@ press **Delete** to remove the completion, or press **→** to accept it and kee
 ### Tab and history results
 
 Search ranks exact page titles and addresses before prefixes, partial words, and fuzzy
-letter matches. Accents and case do not affect matching. Bookmarks, visit frequency, and
+title matches, whose letters must start a word and stay close together; addresses match
+only literally. Accents and case do not affect matching. Bookmarks, visit frequency, and
 recency break relevance ties. Tab search searches the current profile and offers an
 **All open Spaces** filter for the live tabs it can access. History (`⌘Y`) offers
 explicit profile selection and Today, Yesterday, Last 7 days, and Last 30 days filters.

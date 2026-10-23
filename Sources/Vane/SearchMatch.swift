@@ -108,16 +108,24 @@ struct SearchMatch: Sendable {
                 }
                 let boundary = boundaries[i]
                 if qi == 0 {
-                    current[i] = 1 + boundary
-                } else if best != missing {
+                    // A fuzzy match starts a word: "gh" is GitHub, not the h in "high".
+                    if boundary > 0 { current[i] = 1 + boundary }
+                } else {
+                    // Tight, not scattered: each letter follows the last within two
+                    // characters, or starts a word. Letters strewn through a long title
+                    // are a coincidence, not what was typed.
+                    let near = max(i >= 2 ? previous[i - 2] : missing, i >= 3 ? previous[i - 3] : missing)
+                    let reach = boundary > 0 ? best : near
                     let contiguous = i > 0 && previous[i - 1] != missing
                         ? previous[i - 1] + 8 : missing
-                    current[i] = max(best, contiguous) + 1 + boundary
+                    let from = max(reach, contiguous)
+                    if from != missing { current[i] = from + 1 + boundary }
                 }
             }
             previous = current
         }
-        return 1_000_000 + min(previous.max() ?? 0, 9_999) * 100 - length
+        guard let top = previous.max(), top > 0 else { return nil }
+        return 1_000_000 + min(top, 9_999) * 100 - length
     }
 
     func page(title: String, url: String, fuzzy: Bool = true) -> Int? {
@@ -138,8 +146,10 @@ struct SearchMatch: Sendable {
         // Preserve the scoring pass's second Unicode fold: Foundation folding is
         // not idempotent for repeated combining marks. ASCII is already final.
         let normalized = address.utf8.allSatisfy { $0 < 128 } ? address : Self.fold(address)
-        let urlScore = scoreFolded(normalized, fuzzy: fuzzy)
-        let literalURLScore = address == foldedURL ? nil : scoreFolded(foldedURL, fuzzy: fuzzy)
+        // Addresses match literally only. Query strings and tokens hold every letter in
+        // some order, so a fuzzy address match is nearly always noise.
+        let urlScore = scoreFolded(normalized, fuzzy: false)
+        let literalURLScore = address == foldedURL ? nil : scoreFolded(foldedURL, fuzzy: false)
         return [titleScore, urlScore, literalURLScore].compactMap { $0 }.max()
     }
 

@@ -29,6 +29,19 @@ final class SearchMatchTests: XCTestCase {
         }
     }
 
+    func testFuzzyMatchesAreTightAndAddressesAreLiteral() {
+        let oauth = "https://accounts.google.com/signin/oauth/v3/consent?as=S5727&client_id=x0d1e&xsrf=Xx"
+        XCTAssertNil(SearchMatch("codexx").page(title: "Sign in - Google Accounts", url: oauth),
+                     "letters scattered through an address are not a match")
+        XCTAssertNotNil(SearchMatch("consent").page(title: "Sign in", url: oauth), "literal address text still is")
+        XCTAssertNotNil(SearchMatch("gthb").score("GitHub"))
+        XCTAssertNotNil(SearchMatch("gh br").score("GitHub Browser"))
+        XCTAssertNotNil(SearchMatch("pip").score("Picture in Picture"))
+        XCTAssertNil(SearchMatch("cdxx").score("Claude vs. Codex – what’s currently better"),
+                     "a fuzzy match cannot wander across a long title")
+        XCTAssertNil(SearchMatch("hb").score("GitHub"), "a fuzzy match starts a word")
+    }
+
     func testNormalizedURLPreservesRepeatedCombiningMarkFolding() {
         // Foundation can remove only one repeated combining mark per fold.
         // URL normalization historically folds once, then scoring folds again.
@@ -137,16 +150,20 @@ private struct OriginalSearchMatch: Sendable {
                 guard t[i] == c else { continue }
                 let boundary = i == 0 ? 12 : (!t[i - 1].isLetter && !t[i - 1].isNumber ? 6 : 0)
                 if qi == 0 {
-                    current[i] = 1 + boundary
-                } else if best != missing {
+                    if boundary > 0 { current[i] = 1 + boundary }
+                } else {
+                    let near = max(i >= 2 ? previous[i - 2] : missing, i >= 3 ? previous[i - 3] : missing)
+                    let reach = boundary > 0 ? best : near
                     let contiguous = i > 0 && previous[i - 1] != missing
                         ? previous[i - 1] + 8 : missing
-                    current[i] = max(best, contiguous) + 1 + boundary
+                    let from = max(reach, contiguous)
+                    if from != missing { current[i] = from + 1 + boundary }
                 }
             }
             previous = current
         }
-        return 1_000_000 + min(previous.max() ?? 0, 9_999) * 100 - length
+        guard let top = previous.max(), top > 0 else { return nil }
+        return 1_000_000 + min(top, 9_999) * 100 - length
     }
 
     func page(title: String, url: String, fuzzy: Bool = true) -> Int? {
@@ -161,8 +178,8 @@ private struct OriginalSearchMatch: Sendable {
             if address.hasPrefix("www."), !query.hasPrefix("www.") { address.removeFirst(4) }
         }
         if address.hasSuffix("/") && !query.hasSuffix("/") { address.removeLast() }
-        let urlScore = score(address, fuzzy: fuzzy)
-        let literalURLScore = address == Self.fold(url) ? nil : score(url, fuzzy: fuzzy)
+        let urlScore = score(address, fuzzy: false)
+        let literalURLScore = address == Self.fold(url) ? nil : score(url, fuzzy: false)
         return [titleScore, urlScore, literalURLScore].compactMap { $0 }.max()
     }
 
