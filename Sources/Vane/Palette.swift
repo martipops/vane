@@ -61,6 +61,28 @@ enum Palette {
 
     }
 
+    /// What to show while a query's results are still arriving. History and the engine
+    /// answer separately, in either order: each source keeps the last query's rows until its
+    /// own new ones are in, so neither half collapses and refills under the reader. Once
+    /// nothing is pending, exactly the live rows — even none.
+    static func heldResults<T, ID: Hashable>(live: [T], held: [T], pending: Bool,
+                                             isCompletion: (T) -> Bool, id: (T) -> ID) -> [T] {
+        guard pending else { return live }
+        let history = live.filter { !isCompletion($0) }
+        let completions = live.filter(isCompletion)
+        let keptHistory = history.isEmpty ? held.filter { !isCompletion($0) } : history
+        let ids = Set(keptHistory.map(id))
+        return keptHistory + (completions.isEmpty
+            ? held.filter { isCompletion($0) && !ids.contains(id($0)) } : completions)
+    }
+
+    /// The slot drawn as hovered. Results are rewritten in place under a still pointer, so
+    /// hover belongs to the slot, not to whichever result stood in it; a slot the list no
+    /// longer has is not lit.
+    static func litSlot(hover: Int?, rowCount: Int) -> Int? {
+        hover.flatMap { $0 < rowCount ? $0 : nil }
+    }
+
     /// The bar before a character is typed (ref 2). Arc's ⌘T opens on this window's own
     /// tabs, most recently used first — `TabSwitcher.recent`'s order, the one ⌃⇥ walks —
     /// capped so the bar stays a glance, with one row under them to report a problem.
@@ -921,7 +943,7 @@ struct CommandField: NSViewRepresentable {
 
     private func line(_ i: Int, _ row: PaletteRow) -> some View {
         let on = i == index
-        let lit = hover == i
+        let lit = Palette.litSlot(hover: hover, rowCount: rows.count) == i
         return HStack(spacing: Look.barRowSpacing) {
             if let image = row.image {
                 SiteIcon(icon: image, size: Look.rowIcon, rounded: !row.detail.hasPrefix("file:"))
@@ -1267,19 +1289,9 @@ struct CommandField: NSViewRepresentable {
     /// History and engine completions land separately; until the engine's do, the last
     /// query's completions stay under the new history instead of vanishing and returning.
     private func shownSuggestions() -> [PaletteRow] {
-        let live = suggestionRows()
-        let isCompletion = { (row: PaletteRow) in row.kind == "Search suggestion" }
-        var shown = live
-        if store.suggestionsPending {
-            // History and the engine answer separately, in either order: each half keeps
-            // the last query's rows until its own new ones are in.
-            let history = live.filter { !isCompletion($0) }
-            let completions = live.filter(isCompletion)
-            let keptHistory = history.isEmpty ? heldSuggestions.filter { !isCompletion($0) } : history
-            let ids = Set(keptHistory.map(\.id))
-            shown = keptHistory + (completions.isEmpty
-                ? heldSuggestions.filter { isCompletion($0) && !ids.contains($0.id) } : completions)
-        }
+        let shown = Palette.heldResults(live: suggestionRows(), held: heldSuggestions,
+                                        pending: store.suggestionsPending,
+                                        isCompletion: { $0.kind == "Search suggestion" }, id: \.id)
         // Held is always what is on screen: typing faster than the engine answers must
         // still carry the newest history forward, not the list from before it arrived.
         heldSuggestions = shown

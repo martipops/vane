@@ -70,4 +70,35 @@ import XCTest
         store.record(URL(string: "https://cafe.example")!, title: "Café handbook")
         XCTAssertEqual(store.suggest("cafe handbook").first?.title, "Café handbook")
     }
+
+    func testHeldResultsSurviveEitherSourceArrivingFirst() {
+        struct Row: Equatable { let id: String; let completion: Bool }
+        let oldHistory = Row(id: "url:old-page", completion: false)
+        let oldPhrase = Row(id: "url:old-search", completion: true)
+        let newHistory = Row(id: "url:new-page", completion: false)
+        let newPhrase = Row(id: "url:new-search", completion: true)
+        func shown(_ live: [Row], pending: Bool = true) -> [Row] {
+            Palette.heldResults(live: live, held: [oldHistory, oldPhrase], pending: pending,
+                                isCompletion: \.completion, id: \.id)
+        }
+        XCTAssertEqual(shown([]), [oldHistory, oldPhrase], "nothing new yet: the last query's rows stay")
+        XCTAssertEqual(shown([newPhrase]), [oldHistory, newPhrase],
+                       "engine first: held history stays until the local lookup answers")
+        XCTAssertEqual(shown([newHistory]), [newHistory, oldPhrase],
+                       "history first: held completions stay until the engine answers")
+        XCTAssertEqual(shown([newHistory, newPhrase]), [newHistory, newPhrase])
+        XCTAssertEqual(shown([], pending: false), [], "once both are in, an empty answer is shown as empty")
+        let sameAsHistory = Row(id: newHistory.id, completion: true)
+        XCTAssertEqual(Palette.heldResults(live: [newHistory], held: [sameAsHistory], pending: true,
+                                           isCompletion: \.completion, id: \.id), [newHistory],
+                       "a held row is never shown twice")
+    }
+
+    func testHoverStaysOnItsSlotWhileResultsReorderUnderAStillPointer() {
+        // Rows are rewritten in place: a reorder keeps the count, so the slot under the
+        // pointer stays lit and now shows whatever result moved into it.
+        XCTAssertEqual(Palette.litSlot(hover: 2, rowCount: 8), 2)
+        XCTAssertNil(Palette.litSlot(hover: 5, rowCount: 3), "a slot the shorter list no longer has is not lit")
+        XCTAssertNil(Palette.litSlot(hover: nil, rowCount: 8))
+    }
 }
