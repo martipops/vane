@@ -1,0 +1,17 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Running Chromium checks</title>
+<h1>Chromium smoke fixture</h1><p id="result">Waiting for the extension…</p>
+<script>
+  const expected = Number(new URLSearchParams(location.search).get('visit'));
+  const previous = Number(localStorage.getItem('vane-smoke-visits') || '0');
+  localStorage.setItem('vane-smoke-visits', String(previous + 1));
+  const timer = setInterval(() => {
+    const extension = document.documentElement.dataset.vaneSmoke;
+    if (!extension) return;
+    clearInterval(timer);
+    const pass = /Chrome\/156\./.test(navigator.userAgent)
+      && Number(extension) === expected && previous + 1 === expected;
+    document.title = (pass ? 'VANE_SMOKE_PASS' : 'VANE_SMOKE_FAIL')
+      + ':visit=' + (previous + 1) + ',extension=' + extension;
+    document.getElementById('result').textContent = document.title;
+  }, 100);
+</script></html>

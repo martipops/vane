@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Playback capabilities</title>
+<style>
+  :root { color-scheme: light dark; font: 15px/1.6 -apple-system, system-ui, sans-serif; }
+  body { margin: 7vh auto; max-width: 720px; padding: 24px; }
+  h1 { font-size: 30px; letter-spacing: -.025em; }
+  p { color: light-dark(#50505a, #bdbdc7); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 13px 0; border-bottom: 1px solid light-dark(#ddd, #444); }
+  th { width: 45%; font-weight: 500; }
+  td { overflow-wrap: anywhere; }
+  a { color: light-dark(#2459a6, #9ac0ff); text-underline-offset: 3px; }
+  button { font: inherit; padding: 6px 14px; cursor: pointer; }
+</style>
+<h1>Playback capabilities</h1>
+<p>This checks available APIs, codecs, and DRM modules. A supported API does not
+prove Netflix or Disney+ playback, resolution, HDR, or license approval.</p>
+<table aria-label="Playback checks"><tbody id="results" aria-live="polite"></tbody></table>
+<p><button id="run">Run again</button></p>
+<p><a href="https://www.netflix.com/">Try Netflix</a> ·
+<a href="https://www.disneyplus.com/">Try Disney+</a></p>
+<script>
+  async function check() {
+    const rows = [];
+    const video = document.createElement('video');
+    rows.push(['Browser engine', navigator.userAgent]);
+    for (const [name, codec] of [
+      ['H.264 / AAC', 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"'],
+      ['VP9 / Opus', 'video/webm; codecs="vp9, opus"'],
+      ['AV1', 'video/mp4; codecs="av01.0.05M.08"']
+    ]) rows.push([name, video.canPlayType(codec) || 'Not advertised']);
+    rows.push(['Encrypted Media API', navigator.requestMediaKeySystemAccess ? 'Available' : 'Unavailable']);
+    for (const [name, key] of [['Widevine', 'com.widevine.alpha'], ['FairPlay', 'com.apple.fps']]) {
+      try {
+        await navigator.requestMediaKeySystemAccess(key, [{
+          initDataTypes: ['cenc'],
+          videoCapabilities: [{ contentType: 'video/mp4; codecs="avc1.42E01E"' }]
+        }]);
+        rows.push([name, 'API accepted configuration; service playback unverified']);
+      } catch (error) { rows.push([name, 'Unavailable for this configuration (' + error.name + ')']); }
+    }
+    const body = document.getElementById('results'); body.replaceChildren();
+    for (const [name, value] of rows) {
+      const row = document.createElement('tr'), label = document.createElement('th'), result = document.createElement('td');
+      label.scope = 'row'; label.textContent = name; result.textContent = value;
+      row.append(label, result); body.append(row);
+    }
+  }
+  document.getElementById('run').addEventListener('click', check);
+  check();
+</script></html>

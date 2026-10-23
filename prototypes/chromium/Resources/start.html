@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Vane Chromium Prototype</title>
+<style>
+  :root { color-scheme: light dark; font: 15px/1.6 -apple-system, system-ui, sans-serif; }
+  body { margin: 12vh auto; max-width: 620px; padding: 24px; }
+  h1 { font-size: 32px; letter-spacing: -.025em; line-height: 1.2; }
+  p { color: light-dark(#50505a, #bdbdc7); }
+  nav { display: flex; flex-wrap: wrap; gap: 12px 24px; margin: 28px 0; }
+  a { color: light-dark(#2459a6, #9ac0ff); text-underline-offset: 3px; }
+  small { color: light-dark(#595963, #b0b0bb); }
+</style>
+<h1>Vane, running Chromium.</h1>
+<p>A separate test browser with a native sidebar. Use the address bar to browse,
+open a few tabs, and try extensions with this prototype’s own profile.</p>
+<nav aria-label="Try the prototype">
+  <a href="https://chromewebstore.google.com/">Chrome Web Store</a>
+  <a href="playback.html">Check playback capabilities</a>
+  <a href="https://www.netflix.com/">Netflix</a>
+  <a href="https://www.disneyplus.com/">Disney+</a>
+</nav>
+<p>The prototype does not import Vane’s tabs, passwords, cookies, or extensions.
+Installed extensions and site data belong to this test profile.</p>
+<small>Experimental build. Widevine and subscription streaming are not validated.
+This is a native-shell feasibility prototype, not the full Vane feature set.</small>
+</html>

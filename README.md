@@ -60,6 +60,10 @@ and [release procedures](docs/RELEASING.md) for testing and distribution.
 
 ## Feature overview
 
+A separate [Chromium feasibility prototype](prototypes/chromium/README.md) is
+available for evaluating a native shell, extensions, and playback capabilities.
+It uses its own test profile; the regular Vane app continues to use WebKit.
+
 | Area | What is implemented |
 | --- | --- |
 | Browsing | Sidebar tabs, Favourites, pinned tabs, folders, multiple windows, private windows, Split View, Peek, and Little Vane. |
