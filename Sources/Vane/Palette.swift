@@ -892,7 +892,10 @@ struct CommandField: NSViewRepresentable {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: Look.barRowGap) {
-                    ForEach(Array(rows.enumerated()), id: \.element.id) { i, row in
+                    // Slots, not rows: a keystroke rewrites each slot in place rather than
+                    // fading out one row and fading in another where it stood. Only slots
+                    // added or removed at the bottom animate.
+                    ForEach(Array(rows.enumerated()), id: \.offset) { i, row in
                         line(i, row)
                     }
                 }
@@ -907,7 +910,7 @@ struct CommandField: NSViewRepresentable {
             .onChange(of: scrollRequest) { listPosition.scrollTo(edge: .top) }
             .onChange(of: index) {
                 guard rows.indices.contains(index) else { return }
-                proxy.scrollTo(rows[index].id)
+                proxy.scrollTo(index)
             }
         }
     }
@@ -987,7 +990,7 @@ struct CommandField: NSViewRepresentable {
         .animation(motion(Look.quick), value: lit)
         .padding(.horizontal, Look.barInset)
         .contentShape(.rect)
-        .id(row.id)
+        .id(i)
         .onHover { hover = $0 ? row.id : (hover == row.id ? nil : hover) }
         .onTapGesture { index = i; activate() }
         .accessibilityElement(children: .ignore)
