@@ -56,6 +56,9 @@ enum Palette {
         let match = SearchMatch(query)
         guard !match.query.isEmpty,
               let score = match.page(title: title, url: url, fuzzy: false) else { return false }
+        // An address with a path is a destination: only that exact page outranks opening it.
+        // Otherwise "google.com/s" switches to any open tab of google.com/search?q=….
+        if match.query.contains("/") { return score == 5_000_000 }
         return score >= SearchMatch.prefixFloor
             || (match.query.count >= 3 && score >= SearchMatch.wordFloor)
 

@@ -55,6 +55,13 @@ import SwiftUI
         XCTAssertTrue(Palette.strong("tur", title: "Giant Purple Turtles", url: "https://example.com"))
         XCTAssertFalse(Palette.strong("tu", title: "Giant Purple Turtles", url: "https://example.com"))
         XCTAssertFalse(Palette.strong("gpt", title: "Giant Purple Turtles", url: "https://example.com"))
+        XCTAssertFalse(Palette.strong("google.com/s", title: "hopper - Google Search",
+                                      url: "https://www.google.com/search?q=hopper"),
+                       "a typed path opens itself rather than any tab that extends it")
+        XCTAssertTrue(Palette.strong("github.com/notnaki/vane", title: "vane",
+                                     url: "https://github.com/notnaki/vane/"))
+        XCTAssertTrue(Palette.strong("github.com", title: "GitHub", url: "https://github.com/notnaki"),
+                      "a bare host still offers its open tab")
         XCTAssertGreaterThan(Palette.score("doc", "mydoc doc")!, Palette.score("doc", "mydocdoc")!)
     }
 
