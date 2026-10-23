@@ -71,3 +71,12 @@
 - [ ] Build and run focused/full checks as justified; inspect every failure and document environmental limits honestly.
 - [ ] Create PR, attach to this task, obtain independent review of current head; fix findings and repeat relevant tests/review.
 - [ ] Confirm final head reviewed, CI passed, approvals and mergeability, then squash merge. Verify merge and stop all tracked test instances.
+
+## Validation findings addressed
+
+The signed rollback fixtures exposed an older release's fresh-welcome resource failure
+and a database-before-crash false pass. Added `AppResources` to resolve the actual packaged
+bundle lazily, with relocated flat-bundle regression tests. Upgrade fixtures preserve
+completed onboarding/default-browser consent, require the same browser identity to remain
+alive, and wait for actual healthy transaction cleanup under startup load. An initial
+notification-loss hypothesis was not established; production health timing is unchanged.

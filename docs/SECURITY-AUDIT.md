@@ -99,6 +99,14 @@ of the unchanged 20 October notarized release also passed strict signature, Gate
 and stapled-ticket checks after extraction by the new reader. These fixture results
 do not replace validation of the final release candidate on supported systems.
 
+Native validation also exposed an older published payload's first-run resource lookup
+failure and a fixture that could report success from a database created before a crash.
+Current artwork/font lookups now prefer the packaged `Contents/Resources` bundle before
+the generated SwiftPM fallback; tests relocate a flat bundle away from its build path.
+Upgrade fixtures preserve completed onboarding and require the same browser identity
+to remain alive after bootstrap. Production launch-health timing remains unchanged;
+the fixture allows slow verification to complete without weakening its success checks.
+
 ### Certificate evaluation and native tokens
 
 Each server-trust challenge now receives a fresh system evaluation. The previous

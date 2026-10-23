@@ -142,6 +142,15 @@ worker and exact child processes; sandboxed LaunchServices callers drop those ov
 and direct execution from an inherited sandbox fails before main on macOS 27. The
 fixture simulates notarization for the local candidate at the transaction boundary;
 actual distribution verification remains the separate installer/release-candidate check.
+The upgrade fixture preserves completed onboarding and requires the restored browser
+to remain alive after database creation. The published v0.0.34 app can crash in its
+fresh-profile welcome screen because its generated resource accessor looks beside
+the app rather than under `Contents/Resources`; this older-payload issue must not be
+mistaken for a successful first installation. Fresh-profile startup remains part of
+the unchanged candidate check, separately from upgrade/rollback validation.
+Current artwork and font lookups use `AppResources`, preferring the packaged resource
+directory before invoking the generated SwiftPM fallback. Relocation/flat-bundle tests
+cover this fix independently of the installed build directory.
 To test the current XPC helper with an unchanged notarized payload, run `SIGN_ID=…
 scripts/test-update-installer-xpc.sh /path/to/current/Vane.app
 /path/to/notarized/Vane.app`.
