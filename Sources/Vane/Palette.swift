@@ -1254,10 +1254,6 @@ struct CommandField: NSViewRepresentable {
         }
     }
 
-    /// History, bookmarks and engine completions, in the order `TabStore.suggest` merged
-    /// them. A completion is a search that has not happened yet, so it gets no url and no
-    /// "Open" label; the others are places, shown with their host so two pages with the
-    /// same title can be told apart.
     /// Held rows are shown only while they still contain what is typed, and only until
     /// this query's own results are in — then those replace them, even when empty.
     private func shownSuggestions() -> [PaletteRow] {
@@ -1272,6 +1268,10 @@ struct CommandField: NSViewRepresentable {
         }
     }
 
+    /// History, bookmarks and engine completions, in the order `TabStore.suggest` merged
+    /// them. A completion is a search that has not happened yet, so it gets no url and no
+    /// "Open" label; the others are places, shown with their host so two pages with the
+    /// same title can be told apart.
     private func suggestionRows() -> [PaletteRow] {
         store.suggestions.map { (s: Suggestion) -> PaletteRow in
             let title = s.title.isEmpty ? s.url : s.title
