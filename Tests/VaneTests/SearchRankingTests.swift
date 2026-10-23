@@ -77,21 +77,25 @@ import XCTest
         let oldPhrase = Row(id: "url:old-search", completion: true)
         let newHistory = Row(id: "url:new-page", completion: false)
         let newPhrase = Row(id: "url:new-search", completion: true)
-        func shown(_ live: [Row], pending: Bool = true) -> [Row] {
-            Palette.heldResults(live: live, held: [oldHistory, oldPhrase], pending: pending,
-                                isCompletion: \.completion, id: \.id)
+        func shown(_ live: [Row], history: Bool = true, engine: Bool = true) -> [Row] {
+            Palette.heldResults(live: live, held: [oldHistory, oldPhrase], historyPending: history,
+                                enginePending: engine, isCompletion: \.completion, id: \.id)
         }
         XCTAssertEqual(shown([]), [oldHistory, oldPhrase], "nothing new yet: the last query's rows stay")
-        XCTAssertEqual(shown([newPhrase]), [oldHistory, newPhrase],
+        XCTAssertEqual(shown([newPhrase], engine: false), [oldHistory, newPhrase],
                        "engine first: held history stays until the local lookup answers")
-        XCTAssertEqual(shown([newHistory]), [newHistory, oldPhrase],
+        XCTAssertEqual(shown([newHistory], history: false), [newHistory, oldPhrase],
                        "history first: held completions stay until the engine answers")
-        XCTAssertEqual(shown([newHistory, newPhrase]), [newHistory, newPhrase])
-        XCTAssertEqual(shown([], pending: false), [], "once both are in, an empty answer is shown as empty")
+        XCTAssertEqual(shown([], history: false), [oldPhrase],
+                       "history answered with nothing while the engine is slow: old history goes")
+        XCTAssertEqual(shown([], history: true, engine: false), [oldHistory],
+                       "the engine answered with nothing: old completions go")
+        XCTAssertEqual(shown([newHistory, newPhrase], history: false, engine: false), [newHistory, newPhrase])
+        XCTAssertEqual(shown([], history: false, engine: false), [], "both in and empty: shown as empty")
         let sameAsHistory = Row(id: newHistory.id, completion: true)
-        XCTAssertEqual(Palette.heldResults(live: [newHistory], held: [sameAsHistory], pending: true,
-                                           isCompletion: \.completion, id: \.id), [newHistory],
-                       "a held row is never shown twice")
+        XCTAssertEqual(Palette.heldResults(live: [newHistory], held: [sameAsHistory], historyPending: false,
+                                           enginePending: true, isCompletion: \.completion, id: \.id),
+                       [newHistory], "a held row is never shown twice")
     }
 
     func testHoverStaysOnItsSlotWhileResultsReorderUnderAStillPointer() {
@@ -100,5 +104,19 @@ import XCTest
         XCTAssertEqual(Palette.litSlot(hover: 2, rowCount: 8), 2)
         XCTAssertNil(Palette.litSlot(hover: 5, rowCount: 3), "a slot the shorter list no longer has is not lit")
         XCTAssertNil(Palette.litSlot(hover: nil, rowCount: 8))
+    }
+
+    func testResultsFitAShortWindowAtTheHighestRowSetting() {
+        // Field, divider and list padding: everything in the bar but its rows.
+        let chrome = Look.barFieldHeight + 1 + (Look.barInset - Look.barRowGap + Look.barInset)
+        let rows = Palette.fittingRows(12, windowHeight: 600, chrome: chrome)
+        XCTAssertLessThan(rows, 12, "twelve rows do not fit a 600pt window")
+        XCTAssertLessThanOrEqual(chrome + Palette.rowsHeight(rows) + Look.inset * 2, 600,
+                                 "the whole bar, rows included, stays inside the window")
+        XCTAssertEqual(Palette.fittingRows(12, windowHeight: 2000, chrome: chrome), 12,
+                       "a tall window draws every row asked for")
+        XCTAssertEqual(Palette.fittingRows(8, windowHeight: 100, chrome: chrome), 1, "never fewer than one")
+        XCTAssertEqual(Palette.fittingRows(8, windowHeight: .infinity, chrome: chrome), 8,
+                       "before the first layout the window's height is unknown")
     }
 }
