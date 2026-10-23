@@ -1257,18 +1257,16 @@ struct CommandField: NSViewRepresentable {
         }
     }
 
-    /// Held rows are shown only while they still contain what is typed, and only until
-    /// this query's own results are in — then those replace them, even when empty.
+    /// The last query's rows stay, all of them, until this query's own results are in —
+    /// then those replace them, even when empty. Filtering them to the new text emptied the
+    /// list whenever they were fuzzy matches, which flashed the bar's defaults for a frame.
     private func shownSuggestions() -> [PaletteRow] {
         let live = suggestionRows()
         guard store.suggestionsPending, live.isEmpty else {
             heldSuggestions = live
             return live
         }
-        let needle = typed.lowercased()
-        return heldSuggestions.filter {
-            $0.title.lowercased().contains(needle) || $0.detail.lowercased().contains(needle)
-        }
+        return heldSuggestions
     }
 
     /// History, bookmarks and engine completions, in the order `TabStore.suggest` merged
