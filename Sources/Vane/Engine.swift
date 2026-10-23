@@ -1054,13 +1054,78 @@ struct TitleReveal: Equatable, Sendable {
         existingWeb = nil
     }
 
-    /// Stop the page synchronously, including media and its WebContent process.
+    /// Stop the page, including media and its WebContent process.
     /// WebKit can release internal references asynchronously after our owners let go.
-    /// The guarded SPI preserves immediate suspension; about:blank remains its fallback.
+    ///
+    /// Media is silenced at once, but the page is unloaded to about:blank before `_close`:
+    /// a page closed outright mid-playback never ends its media session, and macOS keeps a
+    /// dead "playing" Now Playing entry for the life of the app — controls that do nothing,
+    /// coming back whenever another app stops. An ordinary unload runs WebKit's media
+    /// teardown, which retires the entry. The page is already off screen with its delegates
+    /// and handlers detached, so the wait changes nothing visible.
+    ///
+    /// Picture in Picture and fullscreen are ended first, and the unload waits for them:
+    /// unloading a video the system's PiP window is still showing orphans that window, which
+    /// then flickers on screen even after the app has quit.
     private static func close(_ web: WKWebView) {
-        let sel = Selector(("_close"))
-        if web.responds(to: sel) { _ = web.perform(sel) }
-        else if let blank = URL(string: "about:blank") { web.load(URLRequest(url: blank)) }
+        web.setAllMediaPlaybackSuspended(true)
+        web.pauseAllMediaPlayback()
+        web.closeAllMediaPresentations {
+            guard let blank = URL(string: "about:blank") else { return }
+            let sel = Selector(("_close"))
+            guard web.responds(to: sel) else { web.load(URLRequest(url: blank)); return }
+            PageUnload.run(web, to: blank) { _ = web.perform(sel) }
+        }
+    }
+
+    /// Unloads a closing page to about:blank and closes it as soon as that load has
+    /// finished. It holds the view, and itself, until then: the tab has already let go of
+    /// both. A page that never finishes unloading is closed after `limit` regardless, so it
+    /// cannot outlive its tab.
+    @MainActor private final class PageUnload {
+        nonisolated static let limit: TimeInterval = 2
+        private static var running: [ObjectIdentifier: PageUnload] = [:]
+        private let web: WKWebView
+        private let blank: URL
+        private var watches: [NSKeyValueObservation] = []
+        private var finish: (() -> Void)?
+
+        private init(_ web: WKWebView, blank: URL) {
+            self.web = web
+            self.blank = blank
+        }
+
+        static func run(_ web: WKWebView, to blank: URL, then close: @escaping () -> Void) {
+            let unload = PageUnload(web, blank: blank)
+            let key = ObjectIdentifier(unload)
+            running[key] = unload
+            unload.finish = {
+                close()
+                running[key] = nil
+            }
+            // Either can change last: the load finishing, or the url settling on about:blank.
+            unload.watches = [
+                web.observe(\.isLoading) { [weak unload] _, _ in
+                    DispatchQueue.main.async { unload?.completeIfUnloaded() }
+                },
+                web.observe(\.url) { [weak unload] _, _ in
+                    DispatchQueue.main.async { unload?.completeIfUnloaded() }
+                },
+            ]
+            web.load(URLRequest(url: blank))
+            DispatchQueue.main.asyncAfter(deadline: .now() + limit) { [weak unload] in unload?.complete() }
+        }
+
+        private func completeIfUnloaded() {
+            if !web.isLoading, web.url == blank { complete() }
+        }
+
+        private func complete() {
+            watches = []
+            let done = finish
+            finish = nil
+            done?()
+        }
     }
 
     /// Rebuild the page. `interactionState` sets url and the back/forward list
