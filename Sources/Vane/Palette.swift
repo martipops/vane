@@ -1260,13 +1260,18 @@ struct CommandField: NSViewRepresentable {
     /// The last query's rows stay, all of them, until this query's own results are in —
     /// then those replace them, even when empty. Filtering them to the new text emptied the
     /// list whenever they were fuzzy matches, which flashed the bar's defaults for a frame.
+    /// History and engine completions land separately; until the engine's do, the last
+    /// query's completions stay under the new history instead of vanishing and returning.
     private func shownSuggestions() -> [PaletteRow] {
         let live = suggestionRows()
-        guard store.suggestionsPending, live.isEmpty else {
+        let isCompletion = { (row: PaletteRow) in row.kind == "Search suggestion" }
+        guard store.suggestionsPending, !live.contains(where: isCompletion) else {
             heldSuggestions = live
             return live
         }
-        return heldSuggestions
+        if live.isEmpty { return heldSuggestions }
+        let ids = Set(live.map(\.id))
+        return live + heldSuggestions.filter { isCompletion($0) && !ids.contains($0.id) }
     }
 
     /// History, bookmarks and engine completions, in the order `TabStore.suggest` merged
