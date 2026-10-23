@@ -1131,7 +1131,8 @@ private struct SearchPane: View {
                 }
                 Footnote("The search bar keeps its place as results come and go. Results past "
                          + "the count shown are a scroll away. With animation off, results "
-                         + "change at once as you type.")
+                         + "change at once as you type; Battery Saver and Reduce Motion also "
+                         + "turn it off.")
             }
 
             SettingsCard {
