@@ -1265,13 +1265,16 @@ struct CommandField: NSViewRepresentable {
     private func shownSuggestions() -> [PaletteRow] {
         let live = suggestionRows()
         let isCompletion = { (row: PaletteRow) in row.kind == "Search suggestion" }
-        guard store.suggestionsPending, !live.contains(where: isCompletion) else {
-            heldSuggestions = live
-            return live
+        var shown = live
+        if store.suggestionsPending, !live.contains(where: isCompletion) {
+            let ids = Set(live.map(\.id))
+            shown = live.isEmpty ? heldSuggestions
+                : live + heldSuggestions.filter { isCompletion($0) && !ids.contains($0.id) }
         }
-        if live.isEmpty { return heldSuggestions }
-        let ids = Set(live.map(\.id))
-        return live + heldSuggestions.filter { isCompletion($0) && !ids.contains($0.id) }
+        // Held is always what is on screen: typing faster than the engine answers must
+        // still carry the newest history forward, not the list from before it arrived.
+        heldSuggestions = shown
+        return shown
     }
 
     /// History, bookmarks and engine completions, in the order `TabStore.suggest` merged
