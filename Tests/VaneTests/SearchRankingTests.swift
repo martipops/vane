@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 @testable import vane
 
 @MainActor final class SearchRankingTests: XCTestCase {
@@ -153,6 +154,52 @@ import XCTest
         XCTAssertEqual(Palette.completionSources(typed: "d", history: ["https://docs.google.com/"],
                                                  held: [], firstLetter: lookup, tabs: []).first,
                        "https://docs.google.com/", "this query's own history ranks first")
+    }
+
+    func testAcceptedCompletionKeepsItsOriginUntilTheNextEdit() throws {
+        let server = try XCTUnwrap(Palette.completeHost("se", urls: ["http://server/wiki"]))
+        // → / End / ← / Home / a click commit "server" to the query while `server` is the
+        // completion: Return must still open http://server/, not search for "server".
+        let accepted = Palette.carriedCompletion(nil, completion: server, query: "server")
+        XCTAssertEqual(accepted?.url.absoluteString, "http://server/")
+        XCTAssertEqual(Palette.carriedCompletion(accepted, completion: nil, query: "server")?.url,
+                       server.url, "still standing once the completion itself is gone")
+        XCTAssertEqual(Palette.carriedCompletion(accepted, completion: nil, query: "SERVER")?.url,
+                       server.url, "case typed before the tail does not matter")
+        XCTAssertNil(Palette.carriedCompletion(accepted, completion: nil, query: "server/x"),
+                     "the next edit lets it go")
+        XCTAssertNil(Palette.carriedCompletion(nil, completion: server, query: "se"),
+                     "a completion still showing is not yet accepted")
+    }
+
+    @MainActor
+    func testMovingTheCaretOffAnInlineCompletionAcceptsIt() {
+        var query = "se"
+        let field = CommandField(text: Binding(get: { query }, set: { query = $0 }), prompt: "",
+                                 selectAll: false, label: "", hint: "", onKey: { _ in false })
+        let coordinator = field.makeCoordinator()
+        let editor = NSTextView()
+        editor.string = "server"
+        func move(to range: NSRange) {
+            coordinator.showsCompletion = true
+            query = "se"
+            editor.setSelectedRange(range)
+            coordinator.selectionMoved(in: editor)
+        }
+        move(to: NSRange(location: 2, length: 4))
+        XCTAssertEqual(query, "se", "the tail still selected is still a completion")
+        move(to: NSRange(location: 6, length: 0))
+        XCTAssertEqual(query, "server", "→ or End accepts the whole host")
+        XCTAssertFalse(coordinator.showsCompletion)
+        move(to: NSRange(location: 2, length: 0))
+        XCTAssertEqual(query, "server", "← or a click accepts it too, so the next key edits what is shown")
+        coordinator.showsCompletion = true
+        query = "se"
+        editor.string = "se"
+        editor.setSelectedRange(NSRange(location: 2, length: 0))
+        coordinator.selectionMoved(in: editor)
+        XCTAssertEqual(query, "se", "deleting the tail is not an acceptance")
+        XCTAssertTrue(coordinator.showsCompletion, "…it is left for the text-change path to dismiss")
     }
 
     func testCompletionFollowsTypingForwardIncludingOverTheSeededAddress() {

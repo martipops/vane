@@ -117,6 +117,18 @@ enum Palette {
         history + held + (firstLetter.query == typed ? firstLetter.urls : []) + tabs
     }
 
+    /// The completion an edit leaves standing. Accepting one — → or End, ← or Home, or a
+    /// click, which commit the whole text to the query — keeps its origin while the query
+    /// still reads as that host, so Return opens `http://server/` rather than re-parsing
+    /// `server` as a search. The next edit that changes the text lets it go.
+    static func carriedCompletion(_ accepted: HostCompletion?, completion: HostCompletion?,
+                                  query: String) -> HostCompletion? {
+        let same = { (c: HostCompletion) in c.text.caseInsensitiveCompare(query) == .orderedSame }
+        if let completion, same(completion) { return completion }
+        if let accepted, same(accepted) { return accepted }
+        return nil
+    }
+
     /// What the field shows (`text`) and where Return goes (`url`): the site's own origin,
     /// so a port or a single-label intranet host survives what re-parsing the text would lose.
     struct HostCompletion: Equatable {
@@ -541,6 +553,7 @@ struct CommandField: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSTextField {
         let f = BarField(string: text)
+        context.coordinator.watchSelection(of: f)
         f.onForget = { [weak coordinator = context.coordinator] in
             coordinator?.parent.onKey(.forget) ?? false
         }
@@ -566,6 +579,8 @@ struct CommandField: NSViewRepresentable {
             return text + full.dropFirst(text.count)
         } ?? text
         if f.stringValue != shown {
+            // Placing the tail moves the selection too; that is not the user moving it.
+            context.coordinator.showsCompletion = false
             f.stringValue = shown
             if shown != text, let editor = f.currentEditor() {
                 let start = (text as NSString).length
@@ -625,7 +640,42 @@ struct CommandField: NSViewRepresentable {
             if f.window != nil { focus() }
         }
 
+        private weak var field: NSTextField?
+        private var selectionWatch: NSObjectProtocol?
+
+        func watchSelection(of field: NSTextField) {
+            self.field = field
+            selectionWatch = NotificationCenter.default.addObserver(
+                forName: NSTextView.didChangeSelectionNotification, object: nil, queue: .main
+            ) { [weak self] note in
+                // Only the sender's identity crosses into the main actor; the editor itself
+                // is read back off the field there.
+                let sender = (note.object as AnyObject?).map(ObjectIdentifier.init)
+                MainActor.assumeIsolated {
+                    guard let self, let editor = self.field?.currentEditor() as? NSTextView,
+                          sender == ObjectIdentifier(editor) else { return }
+                    self.selectionMoved(in: editor)
+                }
+            }
+        }
+
+        /// The caret or selection moved while a completion was showing. Off the tail — →,
+        /// End, ←, Home, a click — accepts it: the whole text becomes the query, so the next
+        /// keystroke edits what is on screen. A delete that removed only the tail leaves the
+        /// typed text, which `controlTextDidChange` reads as turning the completion down.
+        func selectionMoved(in editor: NSTextView) {
+            guard showsCompletion else { return }
+            let full = editor.string
+            let typed = (parent.text as NSString).length
+            let tail = NSRange(location: typed, length: (full as NSString).length - typed)
+            guard editor.selectedRange() != tail, full != parent.text else { return }
+            showsCompletion = false
+            parent.text = full
+        }
+
         func invalidate() {
+            if let selectionWatch { NotificationCenter.default.removeObserver(selectionWatch) }
+            selectionWatch = nil
             invalidated = true
             focusGeneration += 1
             (pendingField as? BarField)?.onMount = nil
@@ -664,16 +714,6 @@ struct CommandField: NSViewRepresentable {
                 #selector(NSResponder.deleteWordBackward(_:)),
                 #selector(NSResponder.deleteToBeginningOfLine(_:))].contains(selector) {
                 return parent.onKey(.forget)
-            }
-            // → or End accepts an inline completion: it becomes what was typed, so a delete
-            // after it edits the host instead of bringing the completion straight back.
-            if showsCompletion, [#selector(NSResponder.moveRight(_:)),
-                                 #selector(NSResponder.moveToEndOfLine(_:)),
-                                 #selector(NSResponder.moveToRightEndOfLine(_:)),
-                                 #selector(NSResponder.moveToEndOfDocument(_:))].contains(selector) {
-                showsCompletion = false
-                parent.text = textView.string
-                return false
             }
             switch selector {
             case #selector(NSResponder.deleteBackward(_:)): return parent.onKey(.backspace)
@@ -741,6 +781,8 @@ struct CommandField: NSViewRepresentable {
     /// The host the field is completing to, and whether the last edit was typing forward —
     /// a delete or a paste over the middle turns completion off until the next character.
     @State private var completion: Palette.HostCompletion?
+    /// A completion the user accepted into the query, kept for its origin until the next edit.
+    @State private var acceptedCompletion: Palette.HostCompletion?
     @State private var completionAllowed = false
     @State private var firstLetterVisits: (query: String, urls: [String]) = ("", [])
     /// Every open tab, in every window: a title or favicon arriving redraws the row for it.
@@ -864,6 +906,8 @@ struct CommandField: NSViewRepresentable {
             withAnimation(motion(Look.appear)) { shown = true }
         }
         .onChange(of: query) { old, _ in
+            acceptedCompletion = Palette.carriedCompletion(acceptedCompletion, completion: completion,
+                                                           query: query)
             completionAllowed = Palette.typesForward(from: old, to: query, seeded: seededAddress)
             if query != seededAddress { seededAddress = nil }
             if mode != .tabs, !actionsOnly, activeBang == nil,
@@ -1433,10 +1477,11 @@ struct CommandField: NSViewRepresentable {
         guard !typed.isEmpty else { return nil }
         // An inline completion is what the field shows, so it is what Return opens — its
         // origin, not the text re-parsed.
-        if let completion {
-            return PaletteRow(id: "typed", icon: "globe", title: completion.text,
+        if let site = completion ?? Palette.carriedCompletion(acceptedCompletion, completion: nil,
+                                                              query: typed) {
+            return PaletteRow(id: "typed", icon: "globe", title: completion == nil ? typed : site.text,
                               trailing: "Open", kind: "Open") { target in
-                target().go(completion.url)
+                target().go(site.url)
             }
         }
         let icon: String, trailing: String
