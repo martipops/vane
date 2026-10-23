@@ -101,6 +101,20 @@ def stop(pid, root, sig=signal.SIGTERM):
         os.kill(pid, sig)
 
 
+def drain_processes(root):
+    # Quitting a browser can start/retire an XPC child after our first snapshot.
+    # Keep capturing task-owned identities; never let a confirmation or late child
+    # turn cleanup into a false test failure or escape the final cleanup ledger.
+    deadline = time.monotonic() + 3
+    while track(root) and time.monotonic() < deadline:
+        for pid in list(track(root)):
+            stop(pid, root)
+        time.sleep(.1)
+    for pid in list(track(root)):
+        stop(pid, root, signal.SIGKILL)
+    until(lambda: not track(root), seconds=3)
+
+
 def until(predicate, seconds=20):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -145,7 +159,7 @@ with tempfile.TemporaryDirectory(prefix='.vane-updater-native-', dir=pathlib.Pat
         'let service = InstallerService()', 'let service = InstallerService(applicationsDirectories: [' + roots + '])'))
     service_source = work / 'FixtureService.swift'
     service_source.write_text((ROOT / 'Sources/UpdateInstaller/InstallerService.swift').read_text().replace(
-        'try worker.run()', 'let logURL = URL(fileURLWithPath: isolatedDirectory).appendingPathComponent("worker.log"); FileManager.default.createFile(atPath: logURL.path, contents: nil); worker.standardError = try FileHandle(forWritingTo: logURL); try worker.run()'))
+        'try worker.run()', 'if let directory = isolatedDirectory { let logURL = URL(fileURLWithPath: directory).appendingPathComponent("worker.log"); FileManager.default.createFile(atPath: logURL.path, contents: nil); worker.standardError = try FileHandle(forWritingTo: logURL) }; try worker.run()'))
     sources = ['Sources/Vane/BundleReplacement.swift' , 'Sources/Vane/UpdateVersion.swift', 'Sources/Vane/UpdateInstaller.swift',
                'Sources/Vane/UpdateRelaunch.swift', 'Sources/UpdateInstaller/UpdateInstallation.swift',
                'Sources/UpdateInstaller/InstallerRelaunch.swift']
@@ -158,6 +172,14 @@ with tempfile.TemporaryDirectory(prefix='.vane-updater-native-', dir=pathlib.Pat
     for kind, original in [('old', options.previous), ('new', options.app)]:
         app = work / (kind + '.app')
         shutil.copytree(original.resolve(), app, symlinks=True)
+        if kind == 'new':
+            # Bootstrap and health now contact the candidate's own XPC service. Inject
+            # fixture roots into that helper too; a browser request cannot widen roots.
+            candidate_service = app / 'Contents/XPCServices/io.github.notnaki.vane.UpdateInstaller.xpc'
+            shutil.rmtree(candidate_service)
+            shutil.copytree(service, candidate_service)
+            subprocess.run(['codesign', '--force', '--options', 'runtime', '--timestamp',
+                            '--entitlements', str(ROOT / 'Vane.entitlements'), '--sign', os.environ['SIGN_ID'], str(app)], check=True)
         subprocess.run(['codesign', '--verify', '--deep', '--strict', '--all-architectures', str(app)], check=True)
         templates[kind] = app
     old_version, new_version = version(templates['old']), version(templates['new'])
@@ -268,7 +290,7 @@ with tempfile.TemporaryDirectory(prefix='.vane-updater-native-', dir=pathlib.Pat
                         subprocess.run([str(helper), '--quit', str(pid)], check=True)
                         time.sleep(.3)
                     stop(pid, work)
-                until(lambda: not track(work), seconds=5)
+                drain_processes(work)
                 if process.poll() is None:
                     process.wait(timeout=5)
                 if scenario not in ['failed-bootstrap-stale', 'failed-bootstrap-malformed']:
