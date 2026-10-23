@@ -594,7 +594,9 @@ struct CommandField: NSViewRepresentable {
     /// In-memory rows refresh immediately; database suggestions arrive separately.
     @State private var rows: [PaletteRow] = []
     @State private var layout = Feel03PaletteLayout<PaletteRow>()
-    @State private var hover: String?
+    /// The slot under the pointer. Slots are rewritten in place, so hover follows the
+    /// slot, not whichever row last stood in it.
+    @State private var hover: Int?
     /// Arc's ⇥: the bar narrows to its actions catalogue and says so with a scope chip in
     /// the field. Escape takes the filter off before it closes the bar.
     @State private var actionsOnly = false
@@ -611,9 +613,11 @@ struct CommandField: NSViewRepresentable {
     @State private var heldSuggestions: [PaletteRow] = []
     /// Every open tab, in every window: a title or favicon arriving redraws the row for it.
     @StateObject private var tabs = ChangeWatch()
-    @AppStorage(Look.barVisibleRowsKey) private var visibleRows = Look.barVisibleRows
-    @AppStorage(Look.barTopKey) private var barTop = Look.barTop
-    @AppStorage(Look.barAnimationsKey) private var animations = true
+    // `.vane`, the store Search Settings writes through, so a `VANE_DATA_DIR` instance
+    // reads its own choices rather than the regular app's.
+    @AppStorage(Look.barVisibleRowsKey, store: .vane) private var visibleRows = Look.barVisibleRows
+    @AppStorage(Look.barTopKey, store: .vane) private var barTop = Look.barTop
+    @AppStorage(Look.barAnimationsKey, store: .vane) private var animations = true
 
     /// At most `visibleRows` are visible; the rest are a scroll away. Arithmetic
     /// rather than a preference-key measuring dance, which the fixed row height makes exact.
@@ -917,7 +921,7 @@ struct CommandField: NSViewRepresentable {
 
     private func line(_ i: Int, _ row: PaletteRow) -> some View {
         let on = i == index
-        let lit = hover == row.id
+        let lit = hover == i
         return HStack(spacing: Look.barRowSpacing) {
             if let image = row.image {
                 SiteIcon(icon: image, size: Look.rowIcon, rounded: !row.detail.hasPrefix("file:"))
@@ -991,7 +995,7 @@ struct CommandField: NSViewRepresentable {
         .padding(.horizontal, Look.barInset)
         .contentShape(.rect)
         .id(i)
-        .onHover { hover = $0 ? row.id : (hover == row.id ? nil : hover) }
+        .onHover { hover = $0 ? i : (hover == i ? nil : hover) }
         .onTapGesture { index = i; activate() }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(row.title)
@@ -1266,10 +1270,15 @@ struct CommandField: NSViewRepresentable {
         let live = suggestionRows()
         let isCompletion = { (row: PaletteRow) in row.kind == "Search suggestion" }
         var shown = live
-        if store.suggestionsPending, !live.contains(where: isCompletion) {
-            let ids = Set(live.map(\.id))
-            shown = live.isEmpty ? heldSuggestions
-                : live + heldSuggestions.filter { isCompletion($0) && !ids.contains($0.id) }
+        if store.suggestionsPending {
+            // History and the engine answer separately, in either order: each half keeps
+            // the last query's rows until its own new ones are in.
+            let history = live.filter { !isCompletion($0) }
+            let completions = live.filter(isCompletion)
+            let keptHistory = history.isEmpty ? heldSuggestions.filter { !isCompletion($0) } : history
+            let ids = Set(keptHistory.map(\.id))
+            shown = keptHistory + (completions.isEmpty
+                ? heldSuggestions.filter { isCompletion($0) && !ids.contains($0.id) } : completions)
         }
         // Held is always what is on screen: typing faster than the engine answers must
         // still carry the newest history forward, not the list from before it arrived.
