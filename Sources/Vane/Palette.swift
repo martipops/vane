@@ -607,11 +607,16 @@ struct CommandField: NSViewRepresentable {
     @State private var scrollRequest = 0
     /// Every open tab, in every window: a title or favicon arriving redraws the row for it.
     @StateObject private var tabs = ChangeWatch()
+    @AppStorage(Look.barVisibleRowsKey) private var visibleRows = Look.barVisibleRows
+    @AppStorage(Look.barTopKey) private var barTop = Look.barTop
 
-    /// At most `Look.barVisibleRows` are visible; the rest are a scroll away. Arithmetic
+    /// At most `visibleRows` are visible; the rest are a scroll away. Arithmetic
     /// rather than a preference-key measuring dance, which the fixed row height makes exact.
     private var listHeight: CGFloat {
-        let n = CGFloat(min(rows.count, Look.barVisibleRows))
+        rowsHeight(min(rows.count, Look.clampedVisibleRows(visibleRows)))
+    }
+    private func rowsHeight(_ count: Int) -> CGFloat {
+        let n = CGFloat(count)
         return n * Look.barRowHeight + max(0, n - 1) * Look.barRowGap
     }
     /// Above and below the rows: a row gap's less at the top, where the divider already
@@ -625,6 +630,15 @@ struct CommandField: NSViewRepresentable {
         fieldHeight + (mode == .tabs && !store.isPrivate && !store.isLittle && !actionsOnly
                        ? Look.control + Look.barRowGap : 0)
             + (rows.isEmpty ? 0 : 1 + listHeight + listPadding)
+    }
+    /// The search bar's top edge stays put while results arrive and leave, so the field
+    /// does not chase the list's height. It is clamped against the tallest the list can
+    /// get, so a short window moves it once, not per keystroke.
+    private func searchTop(_ height: CGFloat) -> CGFloat {
+        let chrome = barHeight - (rows.isEmpty ? 0 : 1 + listHeight + listPadding)
+        let tallest = chrome + 1 + rowsHeight(Look.clampedVisibleRows(visibleRows)) + listPadding
+        return max(Look.inset, min(height * Look.clampedBarTop(barTop),
+                                   height - tallest - Look.inset))
     }
 
     /// Nil under Reduce Motion, which SwiftUI reads as "just change".
@@ -666,12 +680,13 @@ struct CommandField: NSViewRepresentable {
                     .scaleEffect(shown ? 1 : Look.appearScale)
                     .opacity(shown ? 1 : 0)
                     // Editing the current address opens over the sidebar pill. Other
-                    // search modes retain their centered layout.
+                    // search modes sit at the position chosen in Search Settings.
                     .padding(.leading, sidebarAddress ? Look.inset : 0)
                     .padding(.top, max(Look.inset,
-                                       min(sidebarAddress ? sidebarLayout.addressTop
-                                           : (geo.size.height - barHeight) / 2,
-                                           geo.size.height - barHeight - Look.inset)))
+                                       sidebarAddress
+                                           ? min(sidebarLayout.addressTop,
+                                                 geo.size.height - barHeight - Look.inset)
+                                           : searchTop(geo.size.height)))
                     .animation(motion(Look.quick), value: rows.count)
                     .animation(reduceMotion || batterySaver.isActive ? nil : Look.quick,
                                value: sidebarLayout.stacked)
