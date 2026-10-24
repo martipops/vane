@@ -593,8 +593,12 @@ struct TitleReveal: Equatable, Sendable {
     /// `createWebViewWith`, which hands it straight on. Nil is a popup that was refused.
     var onPopup: ((WKWebViewConfiguration, Popup.Placement, WKWindowFeatures) -> WKWebView?)?
     /// A popup nothing the user did asked for, refused. The url is what it would have
-    /// loaded, if it said: `window.open()` with none is written into afterwards.
-    var onPopupBlocked: ((URL?) -> Void)?
+    /// loaded, if it said: `window.open()` with none is written into afterwards. The scope
+    /// is the document that asked, fixed now so a later Allow cannot land on the next site.
+    var onPopupBlocked: ((URL?, SitePermissions.Scope?) -> Void)?
+    /// When this tab last said so. A page opening popups on a timer gets one toast per
+    /// `Look.toastDuration`, not the window's toast slot to itself.
+    private var popupNoticeAt: ContinuousClock.Instant?
     /// `window.close()`. Only ever called for a page a script opened, which is why every tab
     /// can carry it: WebKit refuses the call on a page the user navigated to themselves.
     var onClose: (() -> Void)?
@@ -2268,11 +2272,29 @@ struct TitleReveal: Equatable, Sendable {
         // The toast's tab has no `window.opener`: WebKit's request ends with this return.
         var gesture = Popup.userInitiated(action)
         if !gesture {
-            switch SitePermissions.scope(for: self).flatMap({ SitePermissions.remembered(scope: $0, type: .popups) }) {
+            // The answer of the document that is running, not the one loading: `w.url` names
+            // a provisional load's destination while the old page's script still runs, and
+            // that page must not borrow the next site's Allow. A subframe has no top origin
+            // of its own to offer, so it gets the committed history item, and either has
+            // to agree with the tab's site or the popup is only ever offered back.
+            let source = action.sourceFrame
+            let scope = source.isMainFrame
+                ? SitePermissions.Scope(scheme: source.securityOrigin.protocol, host: source.securityOrigin.host,
+                                        port: source.securityOrigin.port, profileID: profileID,
+                                        privateTabID: isPrivate ? id : nil)
+                : SitePermissions.Scope(url: w.backForwardList.currentItem?.url, profileID: profileID,
+                                        privateTabID: isPrivate ? id : nil)
+            let answer = scope == SitePermissions.scope(for: self)
+                ? scope.flatMap { SitePermissions.remembered(scope: $0, type: .popups) } : nil
+            switch answer {
             case true?: gesture = true
             case false?: return nil
             case nil:
-                onPopupBlocked?(action.request.url)
+                let now = ContinuousClock.now
+                if popupNoticeAt.map({ now - $0 >= .seconds(Look.toastDuration) }) ?? true {
+                    popupNoticeAt = now
+                    onPopupBlocked?(action.request.url, scope)
+                }
                 return nil
             }
         }
@@ -3041,15 +3063,21 @@ struct Stash {
             return popup(cfg, placement: placement, opener: t?.id, features: features)
         }
         // Safari's "Block and Notify". Open loads the url beside the page, as a link would;
-        // a popup with no url has nothing to open, so it offers the site's Allow instead.
-        t.onPopupBlocked = { [weak self, weak t] url in
+        // a popup with no url has nothing to open, so it offers the site's Allow instead —
+        // for the site that asked, whatever the tab has moved on to since. A page with no
+        // site to remember an answer for gets the news and no button.
+        t.onPopupBlocked = { [weak self, weak t] url, scope in
             guard let self, let t else { return }
-            let site = Files.pillLabel(t.currentURL) ?? "this page"
-            let action: (title: String, run: @MainActor () -> Void)
+            let site = scope.flatMap { Files.pillLabel(URL(string: $0.origin)) } ?? "this page"
+            var action: (title: String, run: @MainActor () -> Void)?
             if let url, ["http", "https"].contains(url.scheme?.lowercased()) {
                 action = ("Open", { [weak t] in t?.onOpenBeside?(url, true) })
-            } else {
-                action = ("Allow", { [weak t] in if let t { SiteControl.set(.popups, to: true, on: t) } })
+            } else if let scope {
+                let tabID = t.id
+                action = ("Allow", {
+                    SitePermissions.set(scope: scope, type: .popups, answer: true, tabID: tabID)
+                    SiteChanges.shared.bump()
+                })
             }
             Toasts.show("Blocked a pop-up from \(site)", action: action, in: self)
         }

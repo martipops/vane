@@ -336,7 +336,7 @@ import XCTest
         var opened = 0
         var blocked: [URL?] = []
         tab.onPopup = { _, _, _ in opened += 1; return nil }
-        tab.onPopupBlocked = { blocked.append($0) }
+        tab.onPopupBlocked = { url, _ in blocked.append(url) }
         defer { tab.onPopup = nil; tab.onPopupBlocked = nil; SitePermissions.resetAll(profileID: tab.profileID) }
         tab.web.configuration.preferences.javaScriptCanOpenWindowsAutomatically = Popup.readsGesture
         let page = "<title>Opener</title><script>window.open('/popup')</script>"
@@ -356,6 +356,30 @@ import XCTest
         try await compatibilityWait { self.tab.title == "Reloaded" && !self.tab.loading }
         XCTAssertEqual(opened, 1)
         XCTAssertEqual(blocked.count, 1, "Block drops the popup without a toast")
+    }
+
+    func testPageLeavingForAnAllowedSiteCannotBorrowItsPopupAllow() async throws {
+        var opened = 0
+        var blocked: [(URL?, SitePermissions.Scope?)] = []
+        tab.onPopup = { _, _, _ in opened += 1; return nil }
+        tab.onPopupBlocked = { blocked.append(($0, $1)) }
+        defer {
+            tab.onPopup = nil; tab.onPopupBlocked = nil
+            server.heldPaths.remove("/held")
+            SitePermissions.resetAll(profileID: tab.profileID)
+        }
+        tab.web.configuration.preferences.javaScriptCanOpenWindowsAutomatically = Popup.readsGesture
+        let allowed = try XCTUnwrap(SitePermissions.Scope(url: try server.url("/held"), profileID: tab.profileID))
+        SitePermissions.set(scope: allowed, type: .popups, answer: true)
+        server.heldPaths.insert("/held")
+        let page = """
+        <script>location.href = '\(try server.url("/held").absoluteString)'
+        setTimeout(() => window.open('/popup'), 300)</script>
+        """
+        tab.web.loadHTMLString(page, baseURL: URL(string: "https://leaving.example/")!)
+        try await compatibilityWait { !blocked.isEmpty }
+        XCTAssertEqual(opened, 0)
+        XCTAssertEqual(blocked.first?.1?.host, "leaving.example", "the toast names, and its Allow saves, the page that asked")
     }
 
     func testSupersededFailureAndFinishCannotReplaceCurrentDocumentOrWriteHistory() async throws {
