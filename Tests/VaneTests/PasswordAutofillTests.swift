@@ -256,7 +256,9 @@ import XCTest
                 responseHTML: "<form><input id=user autocomplete=username><input id=password type=password></form>")
             try await wait { !tab.web.isLoading }
             tab.fillPassword()
-            try await Task.sleep(for: .milliseconds(200))
+            // A requested fill reads the Keychain first; only a refusal can be judged by time.
+            if expected.isEmpty { try await Task.sleep(for: .milliseconds(200)) }
+            else { try await wait { try await js(tab.web, "password.value") as? String == expected } }
             expectEqual(try await js(tab.web, "password.value") as? String, expected)
             _ = try await js(tab.web, "user.value='typed'; password.value='typed-secret'; document.forms[0].dispatchEvent(new Event('submit',{bubbles:true}))")
             try await Task.sleep(for: .milliseconds(100))

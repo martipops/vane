@@ -445,6 +445,9 @@ struct TitleReveal: Equatable, Sendable {
     /// Only an account name crosses a submitted username step's next navigation.
     /// Never shared between tabs, profiles, frames, or origins; never a stored secret.
     private var passwordStep: (origin: PasswordOrigin, account: String, expires: Date, awaitingNavigation: Bool)?
+    /// The account the user last picked here. Only it may carry on into a separate
+    /// password page: the page's own script can fake the username submission.
+    private var chosenAccount: (origin: PasswordOrigin, account: String, expires: Date)?
     @Published var bookmarked = false
     /// Whether this page has an article worth reading — drives the toolbar button.
     @Published var readerAvailable = false
@@ -835,7 +838,6 @@ struct TitleReveal: Equatable, Sendable {
                         guard let self, let w, self.existingWeb === w, !self.suspended,
                               self.readingDocumentGeneration == document, w.serverTrust === trust else { return }
                         self.certificateTrusted = ok
-                        if ok { self.fillPassword(automatic: true) }
                     }
                 }
             },
@@ -1006,6 +1008,7 @@ struct TitleReveal: Equatable, Sendable {
         readingDocumentGeneration = UUID()
         Reader.forget(tab: self)
         passwordStep = nil
+        chosenAccount = nil
         passwordGeneration = nil
         pendingSave = nil
         passwordOfferExpiry?.cancel()
@@ -1284,9 +1287,9 @@ struct TitleReveal: Equatable, Sendable {
     }
     private var secureHost: String? { secureOrigin?.host }
 
-    /// One saved login fills straight in, the way it always has. Several put the list under
-    /// the username field and wait — guessing which of your two accounts you meant is worse
-    /// than asking, and it is what Arc does.
+    /// Only ever on request (the menu command). One saved login fills straight in; several
+    /// put the list under the username field and wait — guessing which of your two accounts
+    /// you meant is worse than asking.
     ///
     /// Names only until something is chosen: deciding *whether* to ask decrypts nothing.
     func fillPassword(announcing: Bool = false, automatic: Bool = false,
@@ -1408,6 +1411,7 @@ struct TitleReveal: Equatable, Sendable {
                           self.passwordReadRequest == request, self.profileID == profile,
                           case let .success(value) = result else { return }
                     if (value as? Bool) == true {
+                        if !automatic { self.chosenAccount = (login.origin, login.account, .now.addingTimeInterval(120)) }
                         self.lastFilledAt = .now
                         Passwords.recordUse(origin: login.origin, account: login.account, profileID: profile)
                     } else if !automatic { axAnnounce("No sign-in form on this page.") }
@@ -2004,17 +2008,16 @@ struct TitleReveal: Equatable, Sendable {
             passwordStep = (origin, account, .now.addingTimeInterval(120), true)
             return
         }
+        // A form appearing is not consent: nothing fills until the user picks a login from
+        // the chooser or the menu. The one exception is the same sign-in carrying on — the
+        // password page after the username page where that account was picked.
         if body["ready"] as? Bool == true {
-            guard let target = body["target"] as? String else { return }
-            var hint = body["accountHint"] as? String
-            var continuation = false
-            if (hint ?? "").isEmpty, body["mainDocument"] as? Bool == true,
-               body["passwordOnly"] as? Bool == true, let step = passwordStep,
-               !step.awaitingNavigation, step.origin == secureOrigin, step.expires > .now {
-                hint = step.account
-                continuation = true
-            }
-            fillPassword(automatic: true, target: target, accountHint: hint, continuation: continuation)
+            guard let target = body["target"] as? String, (body["accountHint"] as? String ?? "").isEmpty,
+                  body["mainDocument"] as? Bool == true, body["passwordOnly"] as? Bool == true,
+                  let step = passwordStep, !step.awaitingNavigation, step.origin == secureOrigin, step.expires > .now,
+                  let chosen = chosenAccount, chosen.origin == step.origin, chosen.account == step.account,
+                  chosen.expires > .now else { return }
+            fillPassword(automatic: true, target: target, accountHint: step.account, continuation: true)
             return
         }
         // The page saying the list is no longer wanted: a blur, a click elsewhere, a scroll,
@@ -2023,9 +2026,8 @@ struct TitleReveal: Equatable, Sendable {
             closeChooser(ChooserEvent(page: why))
             return
         }
-        // The username field was focused. Nothing happens unless this site has more than one
-        // saved login — one still fills from the menu command, silently. Names only: nothing
-        // is decrypted to answer "is there a choice here".
+        // A login field was focused: the list opens for any saved login, and choosing a row
+        // is what fills. Names only: nothing is decrypted to answer "is there a choice here".
         if body["focus"] as? Bool == true {
             guard let origin = secureOrigin else { return }
             let host = origin.host
