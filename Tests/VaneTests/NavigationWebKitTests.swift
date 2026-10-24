@@ -332,6 +332,32 @@ import XCTest
         XCTAssertEqual(tab.address, try server.url("/opener").absoluteString)
     }
 
+    func testPopupWithNoGestureIsBlockedAndOfferedUnlessTheSiteAllowsIt() async throws {
+        var opened = 0
+        var blocked: [URL?] = []
+        tab.onPopup = { _, _, _ in opened += 1; return nil }
+        tab.onPopupBlocked = { blocked.append($0) }
+        defer { tab.onPopup = nil; tab.onPopupBlocked = nil; SitePermissions.resetAll(profileID: tab.profileID) }
+        tab.web.configuration.preferences.javaScriptCanOpenWindowsAutomatically = Popup.readsGesture
+        let page = "<title>Opener</title><script>window.open('/popup')</script>"
+        let base = try server.url("/opener")
+        tab.web.loadHTMLString(page, baseURL: base)
+        try await compatibilityWait { !blocked.isEmpty }
+        XCTAssertEqual(blocked, [try server.url("/popup")])
+        XCTAssertEqual(opened, 0)
+
+        SiteControl.set(.popups, to: true, on: tab)
+        tab.web.loadHTMLString(page, baseURL: base)
+        try await compatibilityWait { opened == 1 }
+        XCTAssertEqual(blocked.count, 1)
+
+        SiteControl.set(.popups, to: false, on: tab)
+        tab.web.loadHTMLString(page + "<script>document.title = 'Reloaded'</script>", baseURL: base)
+        try await compatibilityWait { self.tab.title == "Reloaded" && !self.tab.loading }
+        XCTAssertEqual(opened, 1)
+        XCTAssertEqual(blocked.count, 1, "Block drops the popup without a toast")
+    }
+
     func testSupersededFailureAndFinishCannotReplaceCurrentDocumentOrWriteHistory() async throws {
         let old = try await load("/old")
         server.heldPaths.insert("/held")

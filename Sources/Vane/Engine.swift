@@ -592,6 +592,9 @@ struct TitleReveal: Equatable, Sendable {
     /// window said it should go. The web view that comes back is WebKit's own — see
     /// `createWebViewWith`, which hands it straight on. Nil is a popup that was refused.
     var onPopup: ((WKWebViewConfiguration, Popup.Placement, WKWindowFeatures) -> WKWebView?)?
+    /// A popup nothing the user did asked for, refused. The url is what it would have
+    /// loaded, if it said: `window.open()` with none is written into afterwards.
+    var onPopupBlocked: ((URL?) -> Void)?
     /// `window.close()`. Only ever called for a page a script opened, which is why every tab
     /// can carry it: WebKit refuses the call on a page the user navigated to themselves.
     var onClose: (() -> Void)?
@@ -1235,7 +1238,9 @@ struct TitleReveal: Equatable, Sendable {
         // ponytail: KVC on a documented-by-name preference, exactly like developerExtrasEnabled
         // below. If the key ever goes away this throws nothing and PiP simply stays off.
         cfg.preferences.setValue(true, forKey: "allowsPictureInPictureMediaPlayback")
-        cfg.preferences.javaScriptCanOpenWindowsAutomatically = false
+        // True so a popup with no click behind it reaches `createWebViewWith`, which blocks it
+        // there and says so. False leaves WebKit to drop it with no trace. See Popups.swift.
+        cfg.preferences.javaScriptCanOpenWindowsAutomatically = Popup.readsGesture
         // isInspectable governs remote inspection from Safari's Develop menu. The in-app
         // inspector window and the "Inspect Element" context-menu item are gated on this
         // preference instead, which has no public setter.
@@ -2258,8 +2263,20 @@ struct TitleReveal: Equatable, Sendable {
             ExternalApps.offer(url, from: action.sourceFrame, tab: self)
             return nil
         }
-        return onPopup?(cfg, Popup.placement(features: windowFeatures,
-                                             userInitiated: Popup.userInitiated(action),
+        // The popup blocker. A click (or a key) behind it always opens; otherwise the site's
+        // Pop-ups answer decides, and Ask blocks it with a toast that can open it after all.
+        // The toast's tab has no `window.opener`: WebKit's request ends with this return.
+        var gesture = Popup.userInitiated(action)
+        if !gesture {
+            switch SitePermissions.scope(for: self).flatMap({ SitePermissions.remembered(scope: $0, type: .popups) }) {
+            case true?: gesture = true
+            case false?: return nil
+            case nil:
+                onPopupBlocked?(action.request.url)
+                return nil
+            }
+        }
+        return onPopup?(cfg, Popup.placement(features: windowFeatures, userInitiated: gesture,
                                              background: action.modifierFlags.contains(.command)), windowFeatures)
     }
 
@@ -3022,6 +3039,19 @@ struct Stash {
         t.onPopup = { [weak self, weak t] cfg, placement, features in
             guard let self else { return nil }
             return popup(cfg, placement: placement, opener: t?.id, features: features)
+        }
+        // Safari's "Block and Notify". Open loads the url beside the page, as a link would;
+        // a popup with no url has nothing to open, so it offers the site's Allow instead.
+        t.onPopupBlocked = { [weak self, weak t] url in
+            guard let self, let t else { return }
+            let site = Files.pillLabel(t.currentURL) ?? "this page"
+            let action: (title: String, run: @MainActor () -> Void)
+            if let url, ["http", "https"].contains(url.scheme?.lowercased()) {
+                action = ("Open", { [weak t] in t?.onOpenBeside?(url, true) })
+            } else {
+                action = ("Allow", { [weak t] in if let t { SiteControl.set(.popups, to: true, on: t) } })
+            }
+            Toasts.show("Blocked a pop-up from \(site)", action: action, in: self)
         }
         // `window.close()`. Deferred a turn: WebKit is inside this web view's own delegate
         // call, and closing the tab drops the view — freeing it under the frame that is
