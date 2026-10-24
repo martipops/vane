@@ -49,11 +49,22 @@ import XCTest
         return (web, capture)
     }
 
-    private func wait(_ condition: () async throws -> Bool) async throws {
+    private struct FixtureTimeout: Error, CustomStringConvertible {
+        let stage: String
+        var description: String { "Password fixture timed out waiting for \(stage)" }
+    }
+
+    private func wait(for stage: String = "fixture condition", file: StaticString = #filePath, line: UInt = #line,
+                      _ condition: () async throws -> Bool) async throws {
         let deadline = Date.now.addingTimeInterval(5)
-        while try await !condition() {
-            if Date.now > deadline { throw NSError(domain: "PasswordFixtureTimeout", code: 1) }
-            try await Task.sleep(for: .milliseconds(20))
+        do {
+            while try await !condition() {
+                if Date.now > deadline { throw FixtureTimeout(stage: stage) }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+        } catch {
+            XCTFail("Failed waiting for \(stage): \(error)", file: file, line: line)
+            throw error
         }
     }
 
@@ -214,7 +225,7 @@ import XCTest
 
     private func loadContinuationPage(_ tab: Tab, origin: PasswordOrigin, path: String, html: String) async throws {
         tab.web.loadSimulatedRequest(URLRequest(url: origin.url.appendingPathComponent(path)), responseHTML: html)
-        try await wait { !tab.web.isLoading }
+        try await wait(for: "continuation document \(path) to finish loading") { !tab.web.isLoading }
     }
 
     private func submitUsernameAndLoadPassword(_ tab: Tab, origin: PasswordOrigin, identity: String = "") async throws {
@@ -273,10 +284,36 @@ import XCTest
         try await withNativeContinuationFixture { tab, origin in
             try await loadContinuationPage(tab, origin: origin, path: "login", html:
                 "<iframe id=embedded srcdoc='<form><input id=user autocomplete=username></form>'></iframe>")
-            try await wait { try await js(tab.web, "!!embedded.contentDocument.getElementById('user')") as? Bool == true }
+            try await wait(for: "embedded username DOM") {
+                try await js(tab.web, "!!embedded.contentDocument.getElementById('user')") as? Bool == true
+            }
             _ = try await js(tab.web, "embedded.contentDocument.getElementById('user').focus()")
-            tab.fillChosen(host: origin.host, account: "bob")
-            try await wait { try await js(tab.web, "embedded.contentDocument.getElementById('user').value") as? String == "bob" }
+            // The child DOM can exist before discovery installs its isolated-world context.
+            // A native row cannot be picked until the bridge and its account list are ready.
+            var embeddedTarget = ""
+            try await wait(for: "isolated-world embedded username target") {
+                embeddedTarget = try await js(tab.web, """
+                    (function () {
+                        var raw = window.__vaneAnchor && window.__vaneAnchor();
+                        var anchor = raw && JSON.parse(raw);
+                        return anchor && anchor.target || '';
+                    })()
+                    """, world: Autofill.world) as? String ?? ""
+                return !embeddedTarget.isEmpty
+            }
+            // Request a fresh chooser after discovery, including when the original focus
+            // happened before its listener existed. Await metadata before choosing the row.
+            tab.closeChooser(.escape)
+            _ = try await js(tab.web, "embedded.contentDocument.getElementById('user').click()")
+            try await wait(for: "native embedded-account chooser") {
+                tab.passwordChoice?.target == embeddedTarget && tab.passwordChoice?.accounts.contains("bob") == true
+            }
+            let choice = try XCTUnwrap(tab.passwordChoice)
+            let target = try XCTUnwrap(choice.target)
+            tab.fillChosen(host: choice.host, account: "bob", port: choice.port, target: target)
+            try await wait(for: "explicitly chosen account to fill the embedded username") {
+                try await js(tab.web, "embedded.contentDocument.getElementById('user').value") as? String == "bob"
+            }
             _ = try await js(tab.web, "document.body.innerHTML='<form><input autocomplete=username value=bob></form>'")
             try await submitUsernameAndLoadPassword(tab, origin: origin)
             try await Task.sleep(for: .milliseconds(250))
