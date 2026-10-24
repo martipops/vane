@@ -341,6 +341,16 @@ import XCTest
         tab.web.configuration.preferences.javaScriptCanOpenWindowsAutomatically = Popup.readsGesture
         let page = "<title>Opener</title><script>window.open('/popup')</script>"
         let base = try server.url("/opener")
+        // Block before anything has loaded: once Ask has shown a toast, the toast's own rate
+        // limit would hide a Block that wrongly showed one too.
+        let scope = try XCTUnwrap(SitePermissions.Scope(url: base, profileID: tab.profileID))
+        SitePermissions.set(scope: scope, type: .popups, answer: false)
+        tab.web.loadHTMLString(page, baseURL: base)
+        try await compatibilityWait { self.tab.title == "Opener" && !self.tab.loading }
+        XCTAssertEqual(opened, 0)
+        XCTAssertTrue(blocked.isEmpty, "Block drops the popup without a toast")
+
+        SiteControl.set(.popups, to: nil, on: tab)
         tab.web.loadHTMLString(page, baseURL: base)
         try await compatibilityWait { !blocked.isEmpty }
         XCTAssertEqual(blocked, [try server.url("/popup")])
@@ -350,12 +360,6 @@ import XCTest
         tab.web.loadHTMLString(page, baseURL: base)
         try await compatibilityWait { opened == 1 }
         XCTAssertEqual(blocked.count, 1)
-
-        SiteControl.set(.popups, to: false, on: tab)
-        tab.web.loadHTMLString(page + "<script>document.title = 'Reloaded'</script>", baseURL: base)
-        try await compatibilityWait { self.tab.title == "Reloaded" && !self.tab.loading }
-        XCTAssertEqual(opened, 1)
-        XCTAssertEqual(blocked.count, 1, "Block drops the popup without a toast")
     }
 
     func testPageLeavingForAnAllowedSiteCannotBorrowItsPopupAllow() async throws {

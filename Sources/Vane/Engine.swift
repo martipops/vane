@@ -596,8 +596,8 @@ struct TitleReveal: Equatable, Sendable {
     /// loaded, if it said: `window.open()` with none is written into afterwards. The scope
     /// is the document that asked, fixed now so a later Allow cannot land on the next site.
     var onPopupBlocked: ((URL?, SitePermissions.Scope?) -> Void)?
-    /// When this tab last said so. A page opening popups on a timer gets one toast per
-    /// `Look.toastDuration`, not the window's toast slot to itself.
+    /// When this tab last said so. A page opening popups on a timer gets one toast for as
+    /// long as a toast stays up (`Prefs.toastSeconds`), not the window's toast slot to itself.
     private var popupNoticeAt: ContinuousClock.Instant?
     /// `window.close()`. Only ever called for a page a script opened, which is why every tab
     /// can carry it: WebKit refuses the call on a page the user navigated to themselves.
@@ -2291,7 +2291,7 @@ struct TitleReveal: Equatable, Sendable {
             case false?: return nil
             case nil:
                 let now = ContinuousClock.now
-                if popupNoticeAt.map({ now - $0 >= .seconds(Look.toastDuration) }) ?? true {
+                if popupNoticeAt.map({ now - $0 >= .seconds(Prefs.toastSeconds) }) ?? true {
                     popupNoticeAt = now
                     onPopupBlocked?(action.request.url, scope)
                 }
