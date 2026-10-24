@@ -1011,7 +1011,10 @@ struct TitleReveal: Equatable, Sendable {
 
     fileprivate func prepareNavigation(to url: URL?, reload: Bool = false) {
         guard !tornDown, !suspended, let url else { return }
-        if committedURL == nil { initialRequestedURL = url }
+        if committedURL == nil {
+            initialRequestedURL = url
+            if !editing { address = url.absoluteString }
+        }
         if reload || !Self.sameDocument(url, from: committedURL) { provisional = true }
     }
 

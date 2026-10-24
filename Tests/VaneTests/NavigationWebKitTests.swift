@@ -397,6 +397,7 @@ import XCTest
         server.heldPaths.insert("/first-held")
         let first = store.newBlankTab(loading: destination)
         XCTAssertEqual(first.currentURL, destination, "An explicit initial request must be restorable before policy runs")
+        XCTAssertEqual(first.address, destination.absoluteString, "A tab without a document should identify its requested page")
         try await compatibilityWait { self.server.requests.contains { $0.hasPrefix("GET /first-held ") } }
         XCTAssertTrue(Session.save())
         let file = ProfileManager.sessionURL(for: profile, in: Store.directory)
@@ -424,6 +425,36 @@ import XCTest
         server.heldPaths.remove("/first-held")
         try await compatibilityWait { restoredFirst.title == "Page /first-held" && !restoredFirst.loading }
         XCTAssertEqual(restoredFirst.currentURL, destination)
+    }
+
+    func testTypedFirstNavigationShowsRequestedAddress() async throws {
+        let destination = try server.url("/typed-first-held")
+        server.heldPaths.insert("/typed-first-held")
+        tab.editing = true
+        tab.go(destination.absoluteString)
+        XCTAssertFalse(tab.editing)
+        XCTAssertEqual(tab.address, destination.absoluteString)
+        try await compatibilityWait { self.server.requests.contains { $0.hasPrefix("GET /typed-first-held ") } }
+        XCTAssertEqual(tab.address, destination.absoluteString)
+        server.heldPaths.remove("/typed-first-held")
+        try await compatibilityWait { self.tab.title == "Page /typed-first-held" && !self.tab.loading }
+        XCTAssertEqual(tab.currentURL, destination)
+    }
+
+    func testProgrammaticFirstNavigationPreservesEditingAddress() async throws {
+        let destination = try server.url("/editing-first-held")
+        server.heldPaths.insert("/editing-first-held")
+        tab.address = "unfinished address draft"
+        tab.editing = true
+        tab.go(destination)
+        XCTAssertTrue(tab.editing)
+        XCTAssertEqual(tab.address, "unfinished address draft")
+        try await compatibilityWait { self.server.requests.contains { $0.hasPrefix("GET /editing-first-held ") } }
+        XCTAssertEqual(tab.address, "unfinished address draft")
+        server.heldPaths.remove("/editing-first-held")
+        try await compatibilityWait { self.tab.title == "Page /editing-first-held" && !self.tab.loading }
+        XCTAssertEqual(tab.currentURL, destination)
+        XCTAssertEqual(tab.address, "unfinished address draft", "Commit must not replace an active editing value")
     }
 
     func testHeldCrossSiteHistoryRedirectKeepsCommittedAddress() async throws {
