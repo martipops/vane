@@ -27,6 +27,65 @@ enum TabKind: Int, Codable, Comparable, Sendable, CaseIterable {
 /// links, linked images, links inside iframes, and open shadow roots resolve in the document
 /// that owns them. Closed shadow roots deliberately remain opaque to the document listener.
 @MainActor final class LinkContextWebView: WKWebView, NSMenuItemValidation {
+    /// Public WebKit commands can publish `url` synchronously, before policy callbacks.
+    /// Keep every caller (including history menus and site controls) behind the same guard.
+    weak var navigationOwner: Tab?
+
+    private func requested(_ navigation: WKNavigation?) -> WKNavigation? {
+        navigationOwner?.expectNavigation(navigation)
+        // A same-document command can finish synchronously inside super, before expect
+        // advances its generation. Reconcile again with that final command identity.
+        navigationOwner?.reconcileIdleDocument(in: self)
+        return navigation
+    }
+
+    override func load(_ request: URLRequest) -> WKNavigation? {
+        navigationOwner?.prepareNavigation(to: request.url)
+        return requested(super.load(request))
+    }
+
+    override func loadFileURL(_ URL: URL, allowingReadAccessTo readAccessURL: URL) -> WKNavigation? {
+        navigationOwner?.prepareNavigation(to: URL)
+        return requested(super.loadFileURL(URL, allowingReadAccessTo: readAccessURL))
+    }
+
+    override func loadHTMLString(_ string: String, baseURL: URL?) -> WKNavigation? {
+        navigationOwner?.prepareNavigation(to: baseURL ?? URL(string: "about:blank"))
+        return requested(super.loadHTMLString(string, baseURL: baseURL))
+    }
+
+    override func loadSimulatedRequest(_ request: URLRequest, responseHTML string: String) -> WKNavigation {
+        navigationOwner?.prepareNavigation(to: request.url)
+        let navigation = super.loadSimulatedRequest(request, responseHTML: string)
+        _ = requested(navigation)
+        return navigation
+    }
+
+    override func reload() -> WKNavigation? {
+        navigationOwner?.prepareNavigation(to: url, reload: true)
+        return requested(super.reload())
+    }
+
+    override func reloadFromOrigin() -> WKNavigation? {
+        navigationOwner?.prepareNavigation(to: url, reload: true)
+        return requested(super.reloadFromOrigin())
+    }
+
+    override func goBack() -> WKNavigation? {
+        navigationOwner?.prepareNavigation(to: backForwardList.backItem?.url)
+        return requested(super.goBack())
+    }
+
+    override func goForward() -> WKNavigation? {
+        navigationOwner?.prepareNavigation(to: backForwardList.forwardItem?.url)
+        return requested(super.goForward())
+    }
+
+    override func go(to item: WKBackForwardListItem) -> WKNavigation? {
+        navigationOwner?.prepareNavigation(to: item.url)
+        return requested(super.go(to: item))
+    }
+
     static let messageName = "vanelinkcontext"
     static let world = WKContentWorld.world(name: "vane-link-context")
     static let itemID = NSUserInterfaceItemIdentifier("VaneOpenLinkInNewTab")
@@ -716,6 +775,7 @@ struct TitleReveal: Equatable, Sendable {
         web.configuration.userContentController.add(WeakHandler(self), contentWorld: SiteBoostScripts.world, name: SiteBoostScripts.messageName)
         NativePiPHostBridge.register(tab: self, web: web)
         if let linkView = web as? LinkContextWebView {
+            linkView.navigationOwner = self
             linkView.openBackground = { [weak self] url in self?.onOpenLinkInBackground?(url) }
             linkView.openDestination = { [weak self] url, destination in self?.onOpenContextLink?(url, destination) }
             linkView.canOpenSplit = { [weak self] in
@@ -751,6 +811,7 @@ struct TitleReveal: Equatable, Sendable {
                                                     name: PageFocus.messageName)
         provisional = false
         committedURL = web.url
+        initialRequestedURL = parkedURL
         // A fresh web view has no page to be insecure about.
         secureContent = true
         certificateTrusted = true
@@ -791,26 +852,19 @@ struct TitleReveal: Equatable, Sendable {
             web.observe(\.isLoading, options: [.new]) { [weak self] w, _ in
                 MainActor.assumeIsolated {
                     guard let self, self.existingWeb === w, !w.isLoading else { return }
-                    // An allowed load can still never start (a beforeunload "Stay", say).
-                    // Nothing in flight means whatever WebKit shows is the page itself.
-                    if self.provisional, !self.suspended, !self.tornDown, w.url != self.allowedTarget {
-                        self.provisional = false
-                        self.showCommitted(w)
-                    }
+                    self.reconcileIdleDocument(in: w)
                     self.scheduleTitleSettle(for: w)
                 }
             },
             web.observe(\.url, options: [.new]) { [weak self] w, _ in
                 MainActor.assumeIsolated {
                     guard let self, self.existingWeb === w, !self.suspended, !self.tornDown else { return }
-                    // A history entry already naming the url is a same-document change (pushState
-                    // after an allowed load that never started); a provisional url never has one.
-                    if !self.provisional || (w.url != nil && w.url != self.allowedTarget
-                                             && w.url == w.backForwardList.currentItem?.url) {
-                        self.provisional = false
+                    if !self.provisional {
                         self.showCommitted(w)
+                        self.recordSameDocumentVisit(in: w)
+                    } else {
+                        self.reconcileIdleDocument(in: w)
                     }
-                    self.recordSameDocumentVisit(in: w)
                     self.extensions.sync()
                 }
             },
@@ -922,21 +976,27 @@ struct TitleReveal: Equatable, Sendable {
     /// The url this tab is on, live or parked. Everything that writes a tab down — pins,
     /// the session, spaces — has to come through here, or a suspended tab quietly vanishes
     /// from all of them.
-    var currentURL: URL? { easelID.map(EaselAddress.url) ?? (existingWeb != nil ? committedURL : parkedURL) }
+    var currentURL: URL? {
+        easelID.map(EaselAddress.url) ?? (existingWeb != nil ? committedURL ?? initialRequestedURL : parkedURL)
+    }
 
     /// The page actually on screen. WebKit's `url` already names a provisional destination
     /// while the old document is still showing, so a page that sends itself somewhere slow
     /// would otherwise put that site's address over its own content.
     private var committedURL: URL?
+    /// Preserve an explicit first request/restored row without mistaking a later
+    /// provisional destination for the document already on screen.
+    private var initialRequestedURL: URL?
     private var provisional = false
-    /// Where the allowed load is going. While it is pending that url is never shown early,
-    /// whichever history entry WebKit already points at.
-    private var allowedTarget: URL?
 
     /// A fragment link never starts a provisional load, so it must not hold the address.
-    nonisolated static func sameDocument(_ action: WKNavigationAction, from current: URL?) -> Bool {
-        guard action.navigationType != .reload, let url = action.request.url, url.fragment != nil,
-              let current else { return false }
+    static func sameDocument(_ action: WKNavigationAction, from current: URL?) -> Bool {
+        guard action.navigationType != .reload, let url = action.request.url else { return false }
+        return sameDocument(url, from: current)
+    }
+
+    private static func sameDocument(_ url: URL, from current: URL?) -> Bool {
+        guard url.fragment != nil, let current else { return false }
         var a = URLComponents(url: url, resolvingAgainstBaseURL: false)
         var b = URLComponents(url: current, resolvingAgainstBaseURL: false)
         a?.fragment = nil; b?.fragment = nil
@@ -945,7 +1005,34 @@ struct TitleReveal: Equatable, Sendable {
 
     private func showCommitted(_ w: WKWebView) {
         committedURL = w.url
+        if committedURL != nil { initialRequestedURL = nil }
         if !editing { address = w.url?.absoluteString ?? "" }
+    }
+
+    fileprivate func prepareNavigation(to url: URL?, reload: Bool = false) {
+        guard !tornDown, !suspended, let url else { return }
+        if committedURL == nil { initialRequestedURL = url }
+        if reload || !Self.sameDocument(url, from: committedURL) { provisional = true }
+    }
+
+    /// An allowed navigation may never start (beforeunload's Stay, for example).
+    /// History items can advance provisionally too; only the idle document's own
+    /// isolated-world location can establish that a URL change really happened.
+    fileprivate func reconcileIdleDocument(in w: WKWebView) {
+        guard w === existingWeb, !tornDown, !suspended, provisional, !loading, !w.isLoading else { return }
+        let expected = w.url, generation = navigationState.policyGeneration
+        w.evaluateJavaScript("location.href", in: nil, in: PageFocus.world) { [weak self, weak w] result in
+            guard let self, let w, self.existingWeb === w, !self.tornDown, !self.suspended,
+                  self.provisional, !self.loading, !w.isLoading, w.url == expected,
+                  self.navigationState.policyGeneration == generation,
+                  case let .success(value) = result, let raw = value as? String,
+                  URL(string: raw) == expected else { return }
+            // Keep the guard armed: an idle beforeunload prompt may still choose Leave.
+            // A later owned commit/finish/failure, rather than this read, releases it.
+            self.showCommitted(w)
+            self.recordSameDocumentVisit(in: w)
+            self.extensions.sync()
+        }
     }
 
     /// Internal canvases never pass through WebKit or the history database.
@@ -1063,6 +1150,7 @@ struct TitleReveal: Equatable, Sendable {
         obs = []                       // KVO on a view that is about to die
         old.stopLoading()
         if let linkView = old as? LinkContextWebView {
+            linkView.navigationOwner = nil
             linkView.openBackground = nil
             linkView.openDestination = nil
             linkView.canOpenSplit = nil
@@ -1601,8 +1689,8 @@ struct TitleReveal: Equatable, Sendable {
 
     func webView(_ w: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         guard w === existingWeb, !tornDown, !suspended else { return }
-        provisional = true
         guard navigationState.begin(navigation) else { return }
+        provisional = true
         retitleTask?.cancel()
         if w === existingWeb { readingDocumentGeneration = UUID(); Reader.forget(tab: self) }
         if w === existingWeb { SiteBoosts.beginNavigation(tab: self) }
@@ -1712,8 +1800,8 @@ struct TitleReveal: Equatable, Sendable {
     /// redirect applies the wrong site's level) and didFinish is too late (the page has
     /// already painted at the old zoom, which reads as a visible reflow bug).
     func webView(_ w: WKWebView, didCommit navigation: WKNavigation!) {
-        if w === existingWeb { provisional = false; showCommitted(w) }
         guard ownsNavigation(navigation, in: w) else { return }
+        provisional = false; showCommitted(w)
         if let item = w.backForwardList.currentItem {
             if navigationState.simulated === navigation {
                 navigationState.simulatedItems.add(item)
@@ -1744,8 +1832,8 @@ struct TitleReveal: Equatable, Sendable {
     }
 
     func webView(_ w: WKWebView, didFinish navigation: WKNavigation!) {
-        if w === existingWeb, provisional { provisional = false; showCommitted(w) }
         guard ownsNavigation(navigation, in: w) else { return }
+        if provisional { provisional = false; showCommitted(w) }
         navigationState.finished = true
         finishCertificateNavigation(navigation, in: w)
         progress = 1
@@ -1789,7 +1877,6 @@ struct TitleReveal: Equatable, Sendable {
             if policy == .allow, navigationAction.targetFrame?.isMainFrame == true,
                !Tab.sameDocument(navigationAction, from: self?.committedURL) {
                 self?.provisional = true
-                self?.allowedTarget = navigationAction.request.url
             }
             decided(policy)
         }
@@ -2257,6 +2344,7 @@ struct TitleReveal: Equatable, Sendable {
         CertificateTrust.navigationStarted(in: self)
         existingWeb?.stopLoading()
         loading = false
+        if let w = existingWeb { reconcileIdleDocument(in: w) }
     }
 
     /// ⌥⌘U. ponytail: WebKit has no view-source: handler, so this is the page's own HTML
