@@ -815,8 +815,10 @@ struct TitleReveal: Equatable, Sendable {
             web.observe(\.fullscreenState, options: [.new]) { [weak self] w, _ in
                 MainActor.assumeIsolated {
                     guard let self, self.existingWeb === w, !self.tornDown else { return }
-                    if w.fullscreenState == .inFullscreen { FullscreenNotice.show(site: Files.pillLabel(self.currentURL), over: w) }
-                    else { FullscreenNotice.hide() }
+                    // Use the committed tab context, never a provisional WKWebView URL.
+                    if w.fullscreenState == .inFullscreen {
+                        FullscreenNotice.show(pageURL: self.currentURL, over: w)
+                    } else { FullscreenNotice.hide(over: w) }
                 }
             },
             web.observe(\.hasOnlySecureContent, options: [.new]) { [weak self] w, _ in
@@ -1024,6 +1026,7 @@ struct TitleReveal: Equatable, Sendable {
         MediaState.shared.forget(id)
         NativePiPHostBridge.unregister(id)
         guard let old = existingWeb else { return }
+        FullscreenNotice.hide(over: old, immediately: true)
         titleSettleTask?.cancel()
         titleSettleTask = nil
         CertificateTrust.navigationStarted(in: self)
@@ -2412,7 +2415,10 @@ struct Stash {
             // The tab being left behind starts its idle clock now, not when it was opened.
             if let old = previousTab {
                 old.lastActive = .now
-                if oldValue != current { old.easelSession?.liveItems.removeAll() }
+                if oldValue != current {
+                    old.easelSession?.liveItems.removeAll()
+                    if let web = old.existingWeb { FullscreenNotice.hide(over: web, immediately: true) }
+                }
                 old.closeChooser(.tabSwitch)   // a list anchored to a page nobody is looking at
             }
             // Selecting a pane by any route at all — ⌘1–9, ⌃⇥, ⌥⌘↑↓, a favourite tile, the
