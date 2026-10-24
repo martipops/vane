@@ -749,6 +749,8 @@ struct TitleReveal: Equatable, Sendable {
         web.configuration.userContentController.add(WeakHandler(self),
                                                     contentWorld: PageFocus.world,
                                                     name: PageFocus.messageName)
+        provisional = false
+        committedURL = web.url
         // A fresh web view has no page to be insecure about.
         secureContent = true
         certificateTrusted = true
@@ -789,13 +791,25 @@ struct TitleReveal: Equatable, Sendable {
             web.observe(\.isLoading, options: [.new]) { [weak self] w, _ in
                 MainActor.assumeIsolated {
                     guard let self, self.existingWeb === w, !w.isLoading else { return }
+                    // An allowed load can still never start (a beforeunload "Stay", say).
+                    // Nothing in flight means whatever WebKit shows is the page itself.
+                    if self.provisional, !self.suspended, !self.tornDown, w.url != self.allowedTarget {
+                        self.provisional = false
+                        self.showCommitted(w)
+                    }
                     self.scheduleTitleSettle(for: w)
                 }
             },
             web.observe(\.url, options: [.new]) { [weak self] w, _ in
                 MainActor.assumeIsolated {
                     guard let self, self.existingWeb === w, !self.suspended, !self.tornDown else { return }
-                    if !self.editing { self.address = w.url?.absoluteString ?? "" }
+                    // A history entry already naming the url is a same-document change (pushState
+                    // after an allowed load that never started); a provisional url never has one.
+                    if !self.provisional || (w.url != nil && w.url != self.allowedTarget
+                                             && w.url == w.backForwardList.currentItem?.url) {
+                        self.provisional = false
+                        self.showCommitted(w)
+                    }
                     self.recordSameDocumentVisit(in: w)
                     self.extensions.sync()
                 }
@@ -908,7 +922,31 @@ struct TitleReveal: Equatable, Sendable {
     /// The url this tab is on, live or parked. Everything that writes a tab down — pins,
     /// the session, spaces — has to come through here, or a suspended tab quietly vanishes
     /// from all of them.
-    var currentURL: URL? { easelID.map(EaselAddress.url) ?? existingWeb?.url ?? parkedURL }
+    var currentURL: URL? { easelID.map(EaselAddress.url) ?? (existingWeb != nil ? committedURL : parkedURL) }
+
+    /// The page actually on screen. WebKit's `url` already names a provisional destination
+    /// while the old document is still showing, so a page that sends itself somewhere slow
+    /// would otherwise put that site's address over its own content.
+    private var committedURL: URL?
+    private var provisional = false
+    /// Where the allowed load is going. While it is pending that url is never shown early,
+    /// whichever history entry WebKit already points at.
+    private var allowedTarget: URL?
+
+    /// A fragment link never starts a provisional load, so it must not hold the address.
+    nonisolated static func sameDocument(_ action: WKNavigationAction, from current: URL?) -> Bool {
+        guard action.navigationType != .reload, let url = action.request.url, url.fragment != nil,
+              let current else { return false }
+        var a = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        var b = URLComponents(url: current, resolvingAgainstBaseURL: false)
+        a?.fragment = nil; b?.fragment = nil
+        return a != nil && a == b
+    }
+
+    private func showCommitted(_ w: WKWebView) {
+        committedURL = w.url
+        if !editing { address = w.url?.absoluteString ?? "" }
+    }
 
     /// Internal canvases never pass through WebKit or the history database.
     /// Missing boards remain identifiable so the page can offer the Library.
@@ -1563,6 +1601,7 @@ struct TitleReveal: Equatable, Sendable {
 
     func webView(_ w: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         guard w === existingWeb, !tornDown, !suspended else { return }
+        provisional = true
         guard navigationState.begin(navigation) else { return }
         retitleTask?.cancel()
         if w === existingWeb { readingDocumentGeneration = UUID(); Reader.forget(tab: self) }
@@ -1595,7 +1634,12 @@ struct TitleReveal: Equatable, Sendable {
     }
 
     func webView(_ w: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        // Only the current navigation's failure means nothing is pending: a superseded
+        // load fails after its replacement was allowed.
         guard ownsNavigation(navigation, in: w) else { return }
+        // Back to the page that never left; WebKit's url falls back to it as well.
+        provisional = false
+        if !editing { address = committedURL?.absoluteString ?? "" }
         navigationState.finished = true
         finishCertificateNavigation(navigation, in: w)
         loading = false
@@ -1668,6 +1712,7 @@ struct TitleReveal: Equatable, Sendable {
     /// redirect applies the wrong site's level) and didFinish is too late (the page has
     /// already painted at the old zoom, which reads as a visible reflow bug).
     func webView(_ w: WKWebView, didCommit navigation: WKNavigation!) {
+        if w === existingWeb { provisional = false; showCommitted(w) }
         guard ownsNavigation(navigation, in: w) else { return }
         if let item = w.backForwardList.currentItem {
             if navigationState.simulated === navigation {
@@ -1699,6 +1744,7 @@ struct TitleReveal: Equatable, Sendable {
     }
 
     func webView(_ w: WKWebView, didFinish navigation: WKNavigation!) {
+        if w === existingWeb, provisional { provisional = false; showCommitted(w) }
         guard ownsNavigation(navigation, in: w) else { return }
         navigationState.finished = true
         finishCertificateNavigation(navigation, in: w)
@@ -1735,6 +1781,18 @@ struct TitleReveal: Equatable, Sendable {
     func webView(_ w: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
         guard w === existingWeb, !tornDown, !suspended else { decisionHandler(.cancel); return }
+        // The address stops following WebKit's url from the moment a main-frame load is
+        // allowed: a cross-site load that swaps processes publishes its destination as the
+        // url before didStartProvisionalNavigation arrives.
+        let decided = decisionHandler
+        let decisionHandler: @MainActor (WKNavigationActionPolicy) -> Void = { [weak self] policy in
+            if policy == .allow, navigationAction.targetFrame?.isMainFrame == true,
+               !Tab.sameDocument(navigationAction, from: self?.committedURL) {
+                self?.provisional = true
+                self?.allowedTarget = navigationAction.request.url
+            }
+            decided(policy)
+        }
         #if compiler(>=6.4)
         if #available(macOS 27.0, *), let navigation = navigationAction.mainFrameNavigation,
            navigationState.isRetired(navigation) { decisionHandler(.cancel); return }
@@ -1938,6 +1996,10 @@ struct TitleReveal: Equatable, Sendable {
             MediaState.shared.handle(m.body, for: self, from: m.frameInfo)
             return
         }
+        // Both scripts are main-frame only, and these handlers live in the page world, so
+        // a message from any other frame is an embedded page speaking for the tab.
+        if m.name == StatusBar.messageName || m.name == Previews.messageName,
+           !m.frameInfo.isMainFrame { return }
         if m.name == StatusBar.messageName { hoveredLink = StatusBar.hover(from: m.body); return }
         if m.name == PageFocus.messageName {
             editableFrames = PageFocus.frames(m.body, in: editableFrames)
