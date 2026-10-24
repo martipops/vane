@@ -386,6 +386,33 @@ import XCTest
         XCTAssertEqual(blocked.first?.1?.host, "leaving.example", "the toast names, and its Allow saves, the page that asked")
     }
 
+    func testPageLeavingForAnotherOriginKeepsItsSilentPopupBlock() async throws {
+        var opened = 0
+        var blocked = 0
+        tab.onPopup = { _, _, _ in opened += 1; return nil }
+        tab.onPopupBlocked = { _, _ in blocked += 1 }
+        defer {
+            tab.onPopup = nil; tab.onPopupBlocked = nil
+            server.heldPaths.remove("/held")
+            SitePermissions.resetAll(profileID: tab.profileID)
+        }
+        tab.web.configuration.preferences.javaScriptCanOpenWindowsAutomatically = Popup.readsGesture
+        let leaving = try server.url("/blocked-opener")
+        let destination = try server.url("/held", host: "localhost")
+        let scope = try XCTUnwrap(SitePermissions.Scope(url: leaving, profileID: tab.profileID))
+        SitePermissions.set(scope: scope, type: .popups, answer: false)
+        server.heldPaths.insert("/held")
+        let page = """
+        <script>location.href = '\(destination.absoluteString)'
+        setTimeout(() => { window.open('/popup'); document.title = 'Popup attempted' }, 300)</script>
+        """
+        tab.web.loadHTMLString(page, baseURL: leaving)
+        try await compatibilityWait { self.tab.title == "Popup attempted" }
+        XCTAssertEqual(tab.web.url, destination, "the outgoing document is running behind a provisional destination")
+        XCTAssertEqual(opened, 0)
+        XCTAssertEqual(blocked, 0, "the outgoing document's Block remains silent while another origin loads")
+    }
+
     func testSupersededFailureAndFinishCannotReplaceCurrentDocumentOrWriteHistory() async throws {
         let old = try await load("/old")
         server.heldPaths.insert("/held")

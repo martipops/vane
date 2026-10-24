@@ -2284,8 +2284,11 @@ struct TitleReveal: Equatable, Sendable {
                                         privateTabID: isPrivate ? id : nil)
                 : SitePermissions.Scope(url: w.backForwardList.currentItem?.url, profileID: profileID,
                                         privateTabID: isPrivate ? id : nil)
-            let answer = scope == SitePermissions.scope(for: self)
-                ? scope.flatMap { SitePermissions.remembered(scope: $0, type: .popups) } : nil
+            let remembered = scope.flatMap { SitePermissions.remembered(scope: $0, type: .popups) }
+            // An outgoing document keeps its silent Block. Only Allow needs the live-site
+            // match: refusing a popup cannot lend the provisional destination authority.
+            let answer = remembered == false || scope == SitePermissions.scope(for: self)
+                ? remembered : nil
             switch answer {
             case true?: gesture = true
             case false?: return nil
@@ -3079,7 +3082,7 @@ struct Stash {
                     SiteChanges.shared.bump()
                 })
             }
-            Toasts.show("Blocked a pop-up from \(site)", action: action, in: self)
+            Toasts.show("Blocked a pop-up from \(site)", action: action, in: self, replacingCurrent: false)
         }
         // `window.close()`. Deferred a turn: WebKit is inside this web view's own delegate
         // call, and closing the tab drops the view — freeing it under the frame that is
