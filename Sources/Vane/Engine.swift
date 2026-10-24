@@ -812,6 +812,13 @@ struct TitleReveal: Equatable, Sendable {
             web.observe(\.canGoForward, options: [.new]) { [weak self] w, _ in
                 MainActor.assumeIsolated { if self?.existingWeb === w { self?.canGoForward = w.canGoForward } }
             },
+            web.observe(\.fullscreenState, options: [.new]) { [weak self] w, _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.existingWeb === w, !self.tornDown else { return }
+                    if w.fullscreenState == .inFullscreen { FullscreenNotice.show(site: Files.pillLabel(self.currentURL), over: w) }
+                    else { FullscreenNotice.hide() }
+                }
+            },
             web.observe(\.hasOnlySecureContent, options: [.new]) { [weak self] w, _ in
                 MainActor.assumeIsolated {
                     guard let self, self.existingWeb === w, !self.suspended, !self.tornDown else { return }
