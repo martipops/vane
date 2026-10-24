@@ -444,10 +444,10 @@ struct TitleReveal: Equatable, Sendable {
     private var lastFilledAt = Date.distantPast
     /// Only an account name crosses a submitted username step's next navigation.
     /// Never shared between tabs, profiles, frames, or origins; never a stored secret.
-    private var passwordStep: (origin: PasswordOrigin, account: String, expires: Date, awaitingNavigation: Bool)?
-    /// The account the user last picked here. Only it may carry on into a separate
-    /// password page: the page's own script can fake the username submission.
-    private var chosenAccount: (origin: PasswordOrigin, account: String, expires: Date)?
+    private var passwordStep: (id: UUID, origin: PasswordOrigin, account: String, expires: Date, awaitingNavigation: Bool, continuationAllowed: Bool)?
+    /// A choice belongs to one document and field target. The page can fake a username
+    /// submission, so another form or frame cannot reuse that choice for continuation.
+    private var chosenAccount: (origin: PasswordOrigin, account: String, target: String, document: UUID, expires: Date)?
     @Published var bookmarked = false
     /// Whether this page has an article worth reading — drives the toolbar button.
     @Published var readerAvailable = false
@@ -1287,17 +1287,33 @@ struct TitleReveal: Equatable, Sendable {
     }
     private var secureHost: String? { secureOrigin?.host }
 
+    struct PasswordContinuation {
+        let id: UUID
+        let expires: Date
+    }
+
+    /// A continuation keeps its original authorization through both asynchronous reads.
+    /// A replacement username step, navigation or expired choice revokes the pending fill.
+    private func permitsPasswordContinuation(_ continuation: PasswordContinuation, origin: PasswordOrigin,
+                                              account: String? = nil) -> Bool {
+        guard let step = passwordStep, step.id == continuation.id, step.expires == continuation.expires,
+              step.continuationAllowed, !step.awaitingNavigation, step.expires > .now,
+              step.origin == origin, secureOrigin == origin else { return false }
+        return account.map { $0 == step.account } ?? true
+    }
+
     /// Only ever on request (the menu command). One saved login fills straight in; several
     /// put the list under the username field and wait — guessing which of your two accounts
     /// you meant is worse than asking.
     ///
     /// Names only until something is chosen: deciding *whether* to ask decrypts nothing.
     func fillPassword(announcing: Bool = false, automatic: Bool = false,
-                      target: String? = nil, accountHint: String? = nil, continuation: Bool = false) {
+                      target: String? = nil, accountHint: String? = nil, continuation: PasswordContinuation? = nil) {
         guard !isPrivate, let origin = secureOrigin else {
             if announcing { axAnnounce("No saved password for this page.") }
             return
         }
+        if let continuation, !permitsPasswordContinuation(continuation, origin: origin, account: accountHint) { return }
         let host = origin.host
         // Capture a concrete target before reading any secret or opening the chooser.
         guard let target else {
@@ -1311,12 +1327,13 @@ struct TitleReveal: Equatable, Sendable {
                       let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let target = body["target"] as? String else { return }
                 self.fillPassword(announcing: announcing, automatic: automatic, target: target,
-                                  accountHint: body["accountHint"] as? String)
+                                  accountHint: body["accountHint"] as? String, continuation: continuation)
             }
             return
         }
         readPasswordLogins(origin: origin, announcing: announcing) { [weak self] hits in
             guard let self else { return }
+            if let continuation, !self.permitsPasswordContinuation(continuation, origin: origin, account: accountHint) { return }
             var hits = hits
             if automatic, let hint = accountHint, !hint.isEmpty {
                 hits = hits.filter { $0.account == hint }
@@ -1373,8 +1390,9 @@ struct TitleReveal: Equatable, Sendable {
     /// Fills both fields and remembers the choice, so this account leads the list next time.
     /// The password is read here and nowhere else, and lives exactly as long as the call.
     func fill(_ login: Passwords.Login, automatic: Bool = false, target: String? = nil,
-              continuation: Bool = false) {
+              continuation: PasswordContinuation? = nil) {
         guard !isPrivate, secureOrigin == login.origin else { return }
+        if let continuation, !permitsPasswordContinuation(continuation, origin: login.origin, account: login.account) { return }
         guard let target else {
             let page = web, pageURL = page.url, document = readingDocumentGeneration
             page.evaluateJavaScript("window.__vaneAnchor && window.__vaneAnchor()",
@@ -1397,21 +1415,32 @@ struct TitleReveal: Equatable, Sendable {
         passwordExplicitFillRequest = automatic ? nil : request
         passwordReadTask = Task { [weak self, weak page] in
             do {
+                if let continuation {
+                    guard !Task.isCancelled,
+                          self?.permitsPasswordContinuation(continuation, origin: login.origin, account: login.account) == true else { return }
+                }
                 guard let password = try await reader.secret(login, profileID: profile)
                 else { throw Passwords.Failure(status: errSecItemNotFound) }
                 guard let self, let page, !Task.isCancelled, !self.tornDown, !self.suspended,
                       !self.isPrivate, self.profileID == profile, self.existingWeb === page,
                       page.url == pageURL, self.readingDocumentGeneration == document,
                       self.secureOrigin == login.origin, self.passwordReadRequest == request else { return }
+                if let continuation, !self.permitsPasswordContinuation(continuation, origin: login.origin, account: login.account) { return }
                 page.evaluateJavaScript(Autofill.fillJS(account: login.account, password: password,
-                                                     automatic: automatic, target: target, continuation: continuation),
+                                                     automatic: automatic, target: target, continuation: continuation != nil),
                                        in: nil, in: Autofill.world) { [weak self, weak page] result in
                     guard let self, let page, self.existingWeb === page, page.url == pageURL,
                           self.readingDocumentGeneration == document, self.secureOrigin == login.origin,
                           self.passwordReadRequest == request, self.profileID == profile,
                           case let .success(value) = result else { return }
                     if (value as? Bool) == true {
-                        if !automatic { self.chosenAccount = (login.origin, login.account, .now.addingTimeInterval(120)) }
+                        if !automatic {
+                            self.chosenAccount = (login.origin, login.account, target, document, .now.addingTimeInterval(120))
+                            self.passwordStep?.continuationAllowed = false
+                        } else if let continuation, self.passwordStep?.id == continuation.id,
+                                  self.passwordStep?.expires == continuation.expires {
+                            self.passwordStep?.continuationAllowed = false
+                        }
                         self.lastFilledAt = .now
                         Passwords.recordUse(origin: login.origin, account: login.account, profileID: profile)
                     } else if !automatic { axAnnounce("No sign-in form on this page.") }
@@ -1569,7 +1598,11 @@ struct TitleReveal: Equatable, Sendable {
         guard w === existingWeb, !tornDown, !suspended else { return }
         guard navigationState.begin(navigation) else { return }
         retitleTask?.cancel()
-        if w === existingWeb { readingDocumentGeneration = UUID(); Reader.forget(tab: self) }
+        if w === existingWeb {
+            readingDocumentGeneration = UUID()
+            chosenAccount = nil
+            Reader.forget(tab: self)
+        }
         if w === existingWeb { SiteBoosts.beginNavigation(tab: self) }
         if w === existingWeb {
             FileUploads.cancel(tabID: id)
@@ -2005,19 +2038,29 @@ struct TitleReveal: Equatable, Sendable {
         }
         if let account = body["usernameStep"] as? String, !account.isEmpty,
            body["mainDocument"] as? Bool == true, let origin = secureOrigin {
-            passwordStep = (origin, account, .now.addingTimeInterval(120), true)
+            let selectedExpiry = chosenAccount.flatMap { chosen -> Date? in
+                guard chosen.origin == origin, chosen.account == account,
+                      chosen.document == readingDocumentGeneration,
+                      chosen.target == body["target"] as? String, chosen.expires > .now else { return nil }
+                return chosen.expires
+            }
+            // Typed usernames still carry into save prompts. Only a choice in this exact
+            // main-document username target authorizes the next page to read a secret.
+            passwordStep = (UUID(), origin, account, selectedExpiry ?? .now.addingTimeInterval(120), true, selectedExpiry != nil)
             return
         }
         // A form appearing is not consent: nothing fills until the user picks a login from
         // the chooser or the menu. The one exception is the same sign-in carrying on — the
         // password page after the username page where that account was picked.
         if body["ready"] as? Bool == true {
-            guard let target = body["target"] as? String, (body["accountHint"] as? String ?? "").isEmpty,
+            guard let target = body["target"] as? String,
                   body["mainDocument"] as? Bool == true, body["passwordOnly"] as? Bool == true,
-                  let step = passwordStep, !step.awaitingNavigation, step.origin == secureOrigin, step.expires > .now,
-                  let chosen = chosenAccount, chosen.origin == step.origin, chosen.account == step.account,
-                  chosen.expires > .now else { return }
-            fillPassword(automatic: true, target: target, accountHint: step.account, continuation: true)
+                  let step = passwordStep, !step.awaitingNavigation, step.continuationAllowed,
+                  step.origin == secureOrigin, step.expires > .now else { return }
+            let hint = body["accountHint"] as? String ?? ""
+            guard hint.isEmpty || hint == step.account else { return }
+            fillPassword(automatic: true, target: target, accountHint: step.account,
+                         continuation: PasswordContinuation(id: step.id, expires: step.expires))
             return
         }
         // The page saying the list is no longer wanted: a blur, a click elsewhere, a scroll,

@@ -195,6 +195,179 @@ import XCTest
         expectTrue(tab.pendingSave == nil, "An unchanged saved password must not create a save prompt")
     }
 
+    private func withNativeContinuationFixture(_ body: (Tab, PasswordOrigin) async throws -> Void) async throws {
+        TestEnvironment.prepare()
+        let profile = UUID(), origin = PasswordOrigin(host: "continuation.example.test")
+        defer { Passwords.deleteAll(profileID: profile) }
+        guard Passwords.save(origin: origin, account: "bob", password: "bob-secret", profileID: profile),
+              Passwords.save(origin: origin, account: "ada", password: "ada-secret", profileID: profile)
+        else { throw XCTSkip("Disposable Keychain fixtures unavailable") }
+        let tab = Tab(profileID: profile)
+        let window = NSWindow(contentRect: CGRect(x: -4000, y: -4000, width: 800, height: 600),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = tab.web
+        window.orderFront(nil)
+        defer { tab.tearDown(); window.close() }
+        try await body(tab, origin)
+    }
+
+    private func loadContinuationPage(_ tab: Tab, origin: PasswordOrigin, path: String, html: String) async throws {
+        tab.web.loadSimulatedRequest(URLRequest(url: origin.url.appendingPathComponent(path)), responseHTML: html)
+        try await wait { !tab.web.isLoading }
+    }
+
+    private func submitUsernameAndLoadPassword(_ tab: Tab, origin: PasswordOrigin, identity: String = "") async throws {
+        _ = try await js(tab.web, "document.forms[0].dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))")
+        // Let the native bridge receive the submitted username before starting navigation.
+        try await Task.sleep(for: .milliseconds(100))
+        try await loadContinuationPage(tab, origin: origin, path: "password",
+            html: "<form>" + identity + "<input id=password type=password autocomplete=current-password></form>")
+    }
+
+    func testSelectedAccountContinuesWithHiddenOrReadOnlyIdentity() async throws {
+        for identity in ["<input type=hidden autocomplete=username value=bob>",
+                         "<input readonly autocomplete=username value=bob>"] {
+            try await withNativeContinuationFixture { tab, origin in
+                try await loadContinuationPage(tab, origin: origin, path: "username",
+                    html: "<form><input id=user autocomplete=username></form>")
+                tab.fillChosen(host: origin.host, account: "bob")
+                try await wait { try await js(tab.web, "user.value") as? String == "bob" }
+                try await submitUsernameAndLoadPassword(tab, origin: origin, identity: identity)
+                // Wait for the actual fill rather than judging an async Keychain read by time.
+                try await wait { try await js(tab.web, "password.value") as? String == "bob-secret" }
+                expectEqual(try await js(tab.web, "password.value") as? String, "bob-secret")
+            }
+        }
+    }
+
+    func testSelectedAccountCannotContinueIntoDifferentHiddenOrReadOnlyIdentity() async throws {
+        for identity in ["<input type=hidden autocomplete=username value=ada>",
+                         "<input readonly autocomplete=username value=ada>"] {
+            try await withNativeContinuationFixture { tab, origin in
+                try await loadContinuationPage(tab, origin: origin, path: "username",
+                    html: "<form><input id=user autocomplete=username></form>")
+                tab.fillChosen(host: origin.host, account: "bob")
+                try await wait { try await js(tab.web, "user.value") as? String == "bob" }
+                try await submitUsernameAndLoadPassword(tab, origin: origin, identity: identity)
+                try await Task.sleep(for: .milliseconds(250))
+                expectEqual(try await js(tab.web, "password.value") as? String, "")
+            }
+        }
+    }
+
+    func testFullFormSelectionCannotAuthorizeUnrelatedUsernameStep() async throws {
+        try await withNativeContinuationFixture { tab, origin in
+            try await loadContinuationPage(tab, origin: origin, path: "login",
+                html: "<form><input id=user autocomplete=username><input id=password type=password></form>")
+            tab.fillChosen(host: origin.host, account: "bob")
+            try await wait { try await js(tab.web, "password.value") as? String == "bob-secret" }
+            _ = try await js(tab.web, "document.body.innerHTML='<form><input autocomplete=username value=bob></form>'")
+            try await submitUsernameAndLoadPassword(tab, origin: origin)
+            try await Task.sleep(for: .milliseconds(250))
+            expectEqual(try await js(tab.web, "password.value") as? String, "")
+        }
+    }
+
+    func testEmbeddedSelectionCannotAuthorizeMainDocumentUsernameStep() async throws {
+        try await withNativeContinuationFixture { tab, origin in
+            try await loadContinuationPage(tab, origin: origin, path: "login", html:
+                "<iframe id=embedded srcdoc='<form><input id=user autocomplete=username></form>'></iframe>")
+            try await wait { try await js(tab.web, "!!embedded.contentDocument.getElementById('user')") as? Bool == true }
+            _ = try await js(tab.web, "embedded.contentDocument.getElementById('user').focus()")
+            tab.fillChosen(host: origin.host, account: "bob")
+            try await wait { try await js(tab.web, "embedded.contentDocument.getElementById('user').value") as? String == "bob" }
+            _ = try await js(tab.web, "document.body.innerHTML='<form><input autocomplete=username value=bob></form>'")
+            try await submitUsernameAndLoadPassword(tab, origin: origin)
+            try await Task.sleep(for: .milliseconds(250))
+            expectEqual(try await js(tab.web, "password.value") as? String, "")
+        }
+    }
+
+    func testReplacementUsernameFormCannotReuseExplicitSelection() async throws {
+        try await withNativeContinuationFixture { tab, origin in
+            try await loadContinuationPage(tab, origin: origin, path: "username",
+                html: "<form><input id=user autocomplete=username></form>")
+            tab.fillChosen(host: origin.host, account: "bob")
+            try await wait { try await js(tab.web, "user.value") as? String == "bob" }
+            _ = try await js(tab.web, "document.body.innerHTML='<form><input autocomplete=username value=bob></form>'")
+            try await submitUsernameAndLoadPassword(tab, origin: origin)
+            try await Task.sleep(for: .milliseconds(250))
+            expectEqual(try await js(tab.web, "password.value") as? String, "")
+        }
+    }
+
+    func testSuccessfulContinuationIsConsumedEvenWhenSiteFocusStartsAnotherRead() async throws {
+        try await withNativeContinuationFixture { tab, origin in
+            try await loadContinuationPage(tab, origin: origin, path: "username",
+                html: "<form><input id=user autocomplete=username></form>")
+            tab.fillChosen(host: origin.host, account: "bob")
+            try await wait { try await js(tab.web, "user.value") as? String == "bob" }
+            _ = try await js(tab.web, "document.forms[0].dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))")
+            try await Task.sleep(for: .milliseconds(100))
+            try await loadContinuationPage(tab, origin: origin, path: "password", html: """
+                <form id=login><input id=password type=password autocomplete=current-password></form>
+                <script>
+                password.addEventListener('input', function () {
+                    window.firstFilled = password.value;
+                    login.innerHTML = '<input id=replacement type=password autocomplete=current-password>';
+                    replacement.focus();
+                });
+                </script>
+                """)
+            try await wait { try await js(tab.web, "window.firstFilled || ''") as? String == "bob-secret" }
+            try await Task.sleep(for: .milliseconds(250))
+            expectEqual(try await js(tab.web, "replacement.value") as? String, "")
+        }
+    }
+
+    func testRevokedContinuationCannotReadOrFillAfterDelayedPasswordService() async throws {
+        for delaySecret in [false, true] {
+            try await withNativeContinuationFixture { tab, origin in
+                try await loadContinuationPage(tab, origin: origin, path: "username",
+                    html: "<form><input id=user autocomplete=username></form>")
+                tab.fillChosen(host: origin.host, account: "bob")
+                try await wait { try await js(tab.web, "user.value") as? String == "bob" }
+                let entered = expectation(description: delaySecret ? "secret read started" : "metadata read started")
+                let release = DispatchSemaphore(value: 0)
+                defer { release.signal() }
+                var reader = tab.passwordReader
+                let matches = reader.matches, password = reader.password
+                if delaySecret {
+                    reader.password = { origin, account, profile in
+                        entered.fulfill()
+                        _ = release.wait(timeout: .now() + 3)
+                        return try password(origin, account, profile)
+                    }
+                } else {
+                    reader.matches = { origin, profile in
+                        entered.fulfill()
+                        _ = release.wait(timeout: .now() + 3)
+                        return try matches(origin, profile)
+                    }
+                    reader.password = { origin, account, profile in
+                        XCTFail("A replaced continuation must not read a secret after metadata returns")
+                        return try password(origin, account, profile)
+                    }
+                }
+                tab.passwordReader = reader
+                try await submitUsernameAndLoadPassword(tab, origin: origin)
+                await fulfillment(of: [entered], timeout: 2)
+                // The password target remains live, but another form submits a username
+                // without a choice while its earlier continuation read is pending.
+                _ = try await js(tab.web, """
+                    document.body.insertAdjacentHTML('beforeend','<form id=other><input autocomplete=username value=bob></form>');
+                    other.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));
+                    """)
+                try await Task.sleep(for: .milliseconds(100))
+                release.signal()
+                try await Passwords.flushPendingOperations()
+                try await Task.sleep(for: .milliseconds(250))
+                expectEqual(try await js(tab.web, "password.value") as? String, "")
+            }
+        }
+    }
+
     func testUsernameInputHandlerCannotRedirectSecretIntoHiddenPassword() async throws {
         let (web, _) = try await fixture("""
             <form><input id=user autocomplete=username><input id=password type=password></form>
